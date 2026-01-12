@@ -43,6 +43,8 @@ pub enum BladeRf2Error {
     PllDividerRatio,
     #[error("USB vendor command enable failed")]
     UsbVendor,
+    #[error("Invalid channel configuration")]
+    ChannelConfig,
 }
 
 pub type Result<T> = core::result::Result<T, BladeRf2Error>;
@@ -205,12 +207,12 @@ impl BladeRf2 {
         self.nios.write(Nios8x32::Control, 0, gpio)
     }
 
-    pub fn rx_stream(&mut self) -> Result<RxStream> {
-        RxStream::new(&self.interface, &self.nios)
+    pub fn rx_stream(&mut self, channels: &[usize]) -> Result<RxStream> {
+        RxStream::new(&self.interface, &self.nios, channels)
     }
 
-    pub fn tx_stream(&mut self) -> Result<TxStream> {
-        TxStream::new(&self.interface, &self.nios)
+    pub fn tx_stream(&mut self, channels: &[usize]) -> Result<TxStream> {
+        TxStream::new(&self.interface, &self.nios, channels)
     }
 }
 
@@ -355,7 +357,7 @@ mod test {
     #[test]
     fn test_gain() {
         let mut bladerf = BladeRf2::open_any().unwrap();
-        let mut stream = bladerf.rx_stream().unwrap();
+        let mut stream = bladerf.rx_stream(&[0]).unwrap();
 
         let mut test_gains = |rx0: f64, rx1: f64, tx0: f64, tx1: f64| {
             bladerf.set_gain(Channel::Rx0, rx0).unwrap();
@@ -444,29 +446,63 @@ mod test {
     }
 
     #[test]
-    fn test_loopback() {
+    fn test_i16_loopback() {
         let mut bladerf = BladeRf2::open_any().unwrap();
         bladerf.set_gain(Channel::Rx0, 0.0).unwrap();
 
         bladerf.set_loopback(true).unwrap();
         assert!(bladerf.loopback().unwrap());
 
-        let mut rx = bladerf.rx_stream().unwrap();
-        let mut tx = bladerf.tx_stream().unwrap();
+        let mut rx = bladerf.rx_stream(&[0]).unwrap();
+        let mut tx = bladerf.tx_stream(&[0]).unwrap();
         tx.activate().unwrap();
         rx.activate().unwrap();
 
         // Check i16 loopback
-        let buf = &mut [0; 4096];
-        tx.write_i16(&[-42; 4096]).unwrap();
-        rx.read_i16(buf).unwrap();
-        assert!(buf.iter().all(|x| *x == -42));
+        let tx_data = &mut std::array::from_fn::<_, 4096, _>(|i| i as i16 - 2048);
+        let rx_data = &mut [0; 4096];
+        tx.write_i16(tx_data).unwrap();
+        rx.read_i16(rx_data).unwrap();
+        assert!(tx_data.iter().zip(rx_data.iter()).all(|(x, y)| x == y));
 
-        // Check Complex32 loopback
-        let buf = &mut [Complex32::ZERO; 2048];
-        tx.write(&[Complex32::new(0.25, -0.5); 2048]).unwrap();
-        rx.read(buf).unwrap();
-        assert!(buf.iter().all(|x| *x == Complex32::new(0.25, -0.5)));
+        bladerf.set_loopback(false).unwrap();
+        assert!(!bladerf.loopback().unwrap());
+    }
+
+    #[test]
+    fn test_siso_loopback() {
+        let mut bladerf = BladeRf2::open_any().unwrap();
+        bladerf.set_gain(Channel::Rx0, 0.0).unwrap();
+
+        bladerf.set_loopback(true).unwrap();
+        assert!(bladerf.loopback().unwrap());
+
+        let mut rx = bladerf.rx_stream(&[0]).unwrap();
+        let mut tx = bladerf.tx_stream(&[0]).unwrap();
+        tx.activate().unwrap();
+        rx.activate().unwrap();
+
+        let mut tx_data = [Complex32::ZERO; 4096];
+        let mut rx_data = [Complex32::ZERO; 4096];
+
+        for pow in 1..16 {
+            // Generate complex sinusoidal data
+            for i in 0..tx_data.len() {
+                let phase = 2.0 * std::f32::consts::PI * (i as f32) / 2.0_f32.powi(pow);
+                tx_data[i] = (Complex32::I * phase).exp() * 0.5;
+            }
+
+            tx.write(&[&tx_data]).unwrap();
+            rx.read(&mut [&mut rx_data]).unwrap();
+
+            // Check loopback data
+            for (a, b) in tx_data.iter().zip(rx_data.iter()) {
+                const MAX_ERROR: f32 = 1.0 / 4096.0; // 2^-12
+                let delta = a - b;
+                assert!(delta.re.abs() <= MAX_ERROR);
+                assert!(delta.im.abs() <= MAX_ERROR);
+            }
+        }
 
         bladerf.set_loopback(false).unwrap();
         assert!(!bladerf.loopback().unwrap());

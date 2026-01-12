@@ -5,7 +5,7 @@ version = "0.1.0"
 
 [dependencies]
 bytemuck = "1.24.0"
-num-complex = "0.4.6"
+num-complex = { version = "0.4.6", features = ["bytemuck"] }
 nusb = "0.2.1"
 thiserror = "2.0.17"
 
