@@ -49,7 +49,7 @@ impl RxStream {
 
     pub fn activate(&mut self) -> Result<()> {
         for &channel in self.channels.as_slice() {
-            rfic::enable_module(&mut self.nios, channel, true)?;
+            rfic::enable_module(&self.nios, channel, true)?;
         }
         usb::enable_module(&self.interface, Direction::Rx, true)?;
         Ok(())
@@ -58,7 +58,7 @@ impl RxStream {
     pub fn deactivate(&mut self) -> Result<()> {
         usb::enable_module(&self.interface, Direction::Rx, false)?;
         for &channel in self.channels.as_slice() {
-            rfic::enable_module(&mut self.nios, channel, false)?;
+            rfic::enable_module(&self.nios, channel, false)?;
         }
         Ok(())
     }
@@ -138,7 +138,7 @@ impl TxStream {
 
     pub fn activate(&mut self) -> Result<()> {
         for &channel in self.channels.as_slice() {
-            rfic::enable_module(&mut self.nios, channel, true)?;
+            rfic::enable_module(&self.nios, channel, true)?;
         }
         usb::enable_module(&self.interface, Direction::Tx, true)?;
         Ok(())
@@ -147,7 +147,7 @@ impl TxStream {
     pub fn deactivate(&mut self) -> Result<()> {
         usb::enable_module(&self.interface, Direction::Tx, false)?;
         for &channel in self.channels.as_slice() {
-            rfic::enable_module(&mut self.nios, channel, false)?;
+            rfic::enable_module(&self.nios, channel, false)?;
         }
         Ok(())
     }

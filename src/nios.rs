@@ -140,56 +140,56 @@ impl_nios_packet!(Nios8x32, b'C', u8, u32);
 impl_nios_packet!(Nios8x64, b'D', u8, u64);
 impl_nios_packet!(Nios16x64, b'E', u16, u64);
 
+struct Io {
+    reader: EndpointRead<Bulk>,
+    writer: EndpointWrite<Bulk>,
+}
+
 #[derive(Clone)]
 pub struct Nios {
-    writer: Arc<Mutex<EndpointWrite<Bulk>>>,
-    reader: Arc<Mutex<EndpointRead<Bulk>>>,
+    io: Arc<Mutex<Io>>,
 }
 
 impl Nios {
     pub fn new(interface: &Interface) -> Result<Self> {
-        let writer = interface
-            .endpoint::<Bulk, Out>(Endpoint::PeripheralOut as u8)?
-            .writer(BUFFER_SIZE)
-            .with_write_timeout(Duration::from_secs(5));
         let reader = interface
             .endpoint::<Bulk, In>(Endpoint::PeripheralIn as u8)?
             .reader(BUFFER_SIZE)
             .with_read_timeout(Duration::from_secs(5));
+        let writer = interface
+            .endpoint::<Bulk, Out>(Endpoint::PeripheralOut as u8)?
+            .writer(BUFFER_SIZE)
+            .with_write_timeout(Duration::from_secs(5));
+
         Ok(Self {
-            writer: Arc::new(Mutex::new(writer)),
-            reader: Arc::new(Mutex::new(reader)),
+            io: Arc::new(Mutex::new(Io { reader, writer })),
         })
     }
 
     pub(crate) fn read<Packet: NiosPacket>(
-        &mut self,
+        &self,
         target: Packet,
         address: Packet::Address,
     ) -> Result<Packet::Data> {
-        let mut writer = self.writer.lock().unwrap();
-        let mut reader = self.reader.lock().unwrap();
-
+        let mut io = self.io.lock().unwrap_or_else(|e| e.into_inner());
         let mut buf = target.encode(address, Packet::Data::default(), false);
-        writer.write_all(&buf)?;
-        writer.flush()?;
-        reader.read_exact(&mut buf)?;
+        io.writer.write_all(&buf)?;
+        io.writer.flush()?;
+        io.reader.read_exact(&mut buf)?;
         target.decode(&buf)
     }
 
     pub(crate) fn write<Packet: NiosPacket>(
-        &mut self,
+        &self,
         target: Packet,
         address: Packet::Address,
         data: Packet::Data,
     ) -> Result<()> {
-        let mut writer = self.writer.lock().unwrap();
-        let mut reader = self.reader.lock().unwrap();
-
+        let mut io = self.io.lock().unwrap_or_else(|e| e.into_inner());
         let mut buf = target.encode(address, data, true);
-        writer.write_all(&buf)?;
-        writer.flush()?;
-        reader.read_exact(&mut buf)?;
+        io.writer.write_all(&buf)?;
+        io.writer.flush()?;
+        io.reader.read_exact(&mut buf)?;
         Ok(())
     }
 }

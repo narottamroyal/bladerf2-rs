@@ -55,11 +55,11 @@ impl TryFrom<u64> for State {
     }
 }
 
-fn get_state(nios: &mut Nios) -> Result<State> {
+fn get_state(nios: &Nios) -> Result<State> {
     read(nios, CHANNEL_ALL, Command::Init)?.try_into()
 }
 
-pub fn init(nios: &mut Nios) -> Result<()> {
+pub fn init(nios: &Nios) -> Result<()> {
     let state = get_state(nios)?;
     match state {
         State::Off | State::Standby => write(nios, CHANNEL_ALL, Command::Init, State::On.into()),
@@ -73,11 +73,11 @@ pub fn get_bandwidth_range() -> RangeInclusive<u64> {
     200_000..=56_000_000
 }
 
-pub fn get_bandwidth(nios: &mut Nios, direction: Direction) -> Result<u64> {
+pub fn get_bandwidth(nios: &Nios, direction: Direction) -> Result<u64> {
     read(nios, direction, Command::Bandwidth)
 }
 
-pub fn set_bandwidth(nios: &mut Nios, direction: Direction, bandwidth: u64) -> Result<()> {
+pub fn set_bandwidth(nios: &Nios, direction: Direction, bandwidth: u64) -> Result<()> {
     if !get_bandwidth_range().contains(&bandwidth) {
         return Err(BladeRf2Error::OutOfRange);
     }
@@ -93,11 +93,11 @@ pub fn get_frequency_range(direction: Direction) -> RangeInclusive<u64> {
     }
 }
 
-pub fn get_frequency(nios: &mut Nios, direction: Direction) -> Result<u64> {
+pub fn get_frequency(nios: &Nios, direction: Direction) -> Result<u64> {
     read(nios, direction, Command::Frequency)
 }
 
-pub fn set_frequency(nios: &mut Nios, direction: Direction, frequency: u64) -> Result<()> {
+pub fn set_frequency(nios: &Nios, direction: Direction, frequency: u64) -> Result<()> {
     if !get_frequency_range(direction).contains(&frequency) {
         return Err(BladeRf2Error::OutOfRange);
     }
@@ -136,7 +136,7 @@ const TX_RANGE: GainRange = GainRange {
     offset: 66.0,
 };
 
-fn gain_range(nios: &mut Nios, direction: Direction) -> Result<&GainRange> {
+pub fn gain_range(nios: &Nios, direction: Direction) -> Result<&GainRange> {
     let frequency = get_frequency(nios, direction)?;
     let range = match direction {
         Direction::Rx => RX_RANGES
@@ -148,7 +148,7 @@ fn gain_range(nios: &mut Nios, direction: Direction) -> Result<&GainRange> {
     Ok(range)
 }
 
-pub fn get_gain(nios: &mut Nios, channel: Channel) -> Result<f64> {
+pub fn get_gain(nios: &Nios, channel: Channel) -> Result<f64> {
     let mut gain = read(nios, channel, Command::Gain)? as f64;
     if Direction::from(channel) == Direction::Tx {
         gain *= -1e-3;
@@ -157,7 +157,7 @@ pub fn get_gain(nios: &mut Nios, channel: Channel) -> Result<f64> {
     Ok(gain)
 }
 
-pub fn set_gain(nios: &mut Nios, channel: Channel, mut gain: f64) -> Result<()> {
+pub fn set_gain(nios: &Nios, channel: Channel, mut gain: f64) -> Result<()> {
     let range = gain_range(nios, channel.into())?;
     if !range.gain_range.contains(&gain) {
         return Err(BladeRf2Error::OutOfRange);
@@ -220,14 +220,14 @@ impl TryFrom<u64> for GainMode {
     }
 }
 
-pub fn get_gain_mode(nios: &mut Nios, channel: Channel) -> Result<GainMode> {
+pub fn get_gain_mode(nios: &Nios, channel: Channel) -> Result<GainMode> {
     match channel.into() {
         Direction::Rx => read(nios, channel, Command::GainMode)?.try_into(),
         _ => Err(BladeRf2Error::OutOfRange),
     }
 }
 
-pub fn set_gain_mode(nios: &mut Nios, channel: Channel, mode: GainMode) -> Result<()> {
+pub fn set_gain_mode(nios: &Nios, channel: Channel, mode: GainMode) -> Result<()> {
     match channel.into() {
         Direction::Rx => write(nios, channel, Command::GainMode, mode.into()),
         _ => Err(BladeRf2Error::OutOfRange),
@@ -240,12 +240,12 @@ pub fn get_sample_rate_range() -> RangeInclusive<u64> {
     520_834..=61_440_000
 }
 
-pub fn get_sample_rate(nios: &mut Nios) -> Result<u64> {
+pub fn get_sample_rate(nios: &Nios) -> Result<u64> {
     // All channels share the same sample rate
     read(nios, Channel::Rx0, Command::SampleRate)
 }
 
-pub fn set_sample_rate(nios: &mut Nios, sample_rate: u64) -> Result<()> {
+pub fn set_sample_rate(nios: &Nios, sample_rate: u64) -> Result<()> {
     const LOW_RATE_THRESHOLD: u64 = 2_083_334;
     const HIGH_RATE_THRESHOLD: u64 = 40_000_000;
     const INTERMEDIATE_SAFE_RATE: u64 = 30_000_000;
@@ -315,11 +315,11 @@ impl TryFrom<u64> for FilterMode {
     }
 }
 
-fn get_filter(nios: &mut Nios, direction: Direction) -> Result<FilterMode> {
+fn get_filter(nios: &Nios, direction: Direction) -> Result<FilterMode> {
     read(nios, direction, Command::Filter)?.try_into()
 }
 
-fn set_filter(nios: &mut Nios, direction: Direction, mode: FilterMode) -> Result<()> {
+fn set_filter(nios: &Nios, direction: Direction, mode: FilterMode) -> Result<()> {
     if get_filter(nios, direction)? == mode {
         return Ok(());
     }
@@ -328,14 +328,14 @@ fn set_filter(nios: &mut Nios, direction: Direction, mode: FilterMode) -> Result
 
 // ==================== ENABLE MODULE ====================
 
-fn set_tx_mute(nios: &mut Nios, channel: Channel, mute: bool) -> Result<()> {
+fn set_tx_mute(nios: &Nios, channel: Channel, mute: bool) -> Result<()> {
     match channel.into() {
         Direction::Tx => write(nios, channel, Command::TxMute, mute.into()),
         Direction::Rx => Err(BladeRf2Error::OutOfRange),
     }
 }
 
-pub fn enable_module(nios: &mut Nios, channel: Channel, enable: bool) -> Result<()> {
+pub fn enable_module(nios: &Nios, channel: Channel, enable: bool) -> Result<()> {
     if Direction::from(channel) == Direction::Tx {
         set_tx_mute(nios, channel, !enable)?;
     }
@@ -350,12 +350,12 @@ fn address(channel: impl Into<u16>, command: Command) -> u16 {
     channel | command
 }
 
-fn read(nios: &mut Nios, channel: impl Into<u16>, command: Command) -> Result<u64> {
+fn read(nios: &Nios, channel: impl Into<u16>, command: Command) -> Result<u64> {
     let address = address(channel, command);
     nios.read(Nios16x64::RfIc, address)
 }
 
-fn wait(nios: &mut Nios) -> Result<()> {
+fn wait(nios: &Nios) -> Result<()> {
     for _ in 0..30 {
         let write_queue = (read(nios, CHANNEL_ALL, Command::Status)? >> 8) & 0xFF;
         if write_queue == 0 {
@@ -366,7 +366,7 @@ fn wait(nios: &mut Nios) -> Result<()> {
     Err(BladeRf2Error::Timeout)
 }
 
-fn write(nios: &mut Nios, channel: impl Into<u16>, command: Command, data: u64) -> Result<()> {
+fn write(nios: &Nios, channel: impl Into<u16>, command: Command, data: u64) -> Result<()> {
     let address = address(channel, command);
     nios.write(Nios16x64::RfIc, address, data)?;
     wait(nios)

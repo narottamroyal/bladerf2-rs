@@ -22,7 +22,7 @@ impl From<Address> for u8 {
 // Value of the current sense resistor (R132)
 const R_SHUNT: f32 = 1e-3;
 
-pub fn init(nios: &mut Nios) -> Result<()> {
+pub fn init(nios: &Nios) -> Result<()> {
     // Soft-reset INA219
     const RESET: u16 = 0x8000;
     nios.write(Nios8x16::Ina219, Address::Config.into(), RESET)?;

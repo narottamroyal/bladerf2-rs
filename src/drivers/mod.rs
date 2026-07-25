@@ -19,10 +19,10 @@ pub fn init(interface: &Interface) -> Result<(Nios, Ad5621)> {
     wait_for_device_ready(interface)?;
     let dac_trim = flash::read_vctcxo_trim(interface)?;
     let dac = Ad5621::new(dac_trim);
-    let mut nios = Nios::new(interface)?;
-    ina219::init(&mut nios)?;
-    rfic::init(&mut nios)?;
-    adf4002::init(&mut nios, &dac)?;
+    let nios = Nios::new(interface)?;
+    ina219::init(&nios)?;
+    rfic::init(&nios)?;
+    adf4002::init(&nios, &dac)?;
     Ok((nios, dac))
 }
 

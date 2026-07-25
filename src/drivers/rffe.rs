@@ -26,7 +26,7 @@ enum Control {
     CtrlOut = 24,   // Input only, 24-31
 }
 
-pub fn enable_bias_tee(nios: &mut Nios, direction: Direction) -> Result<()> {
+pub fn enable_bias_tee(nios: &Nios, direction: Direction) -> Result<()> {
     let mut reg = nios.read(Nios8x32::RfFrontend, 0)?;
     match direction {
         Direction::Rx => reg |= 1 << Control::RxBiasEn as u32,
@@ -35,7 +35,7 @@ pub fn enable_bias_tee(nios: &mut Nios, direction: Direction) -> Result<()> {
     nios.write(Nios8x32::RfFrontend, 0, reg)
 }
 
-pub fn disable_bias_tee(nios: &mut Nios, direction: Direction) -> Result<()> {
+pub fn disable_bias_tee(nios: &Nios, direction: Direction) -> Result<()> {
     let mut reg = nios.read(Nios8x32::RfFrontend, 0)?;
     match direction {
         Direction::Rx => reg &= !(1 << Control::RxBiasEn as u32),

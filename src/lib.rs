@@ -1,14 +1,13 @@
 use nusb::{DeviceInfo, Interface, MaybeFuture, Speed, list_devices, transfer::TransferError};
-use std::fmt::Display;
+use std::{fmt::Display, ops::RangeInclusive};
 use thiserror::Error;
 
 use crate::{
-    drivers::{
-        ad5621::Ad5621,
-        adf4002, rffe,
-        rfic::{self, GainMode},
-    },
+    drivers::{ad5621::Ad5621, adf4002, rffe, rfic},
     nios::{Nios, Nios8x32, Nios8x64},
+};
+pub use crate::{
+    rfic::GainMode,
     stream::{RxStream, TxStream},
 };
 
@@ -50,7 +49,7 @@ pub enum BladeRf2Error {
 pub type Result<T> = core::result::Result<T, BladeRf2Error>;
 
 pub struct BladeRf2 {
-    _info: DeviceInfo,
+    info: DeviceInfo,
     interface: Interface,
     nios: Nios,
     dac: Ad5621,
@@ -111,82 +110,105 @@ impl BladeRf2 {
         let (nios, dac) = drivers::init(&interface)?;
 
         Ok(Self {
-            _info: info,
+            info,
             interface,
             nios,
             dac,
         })
     }
 
-    pub fn bandwidth(&mut self, direction: Direction) -> Result<u64> {
-        rfic::get_bandwidth(&mut self.nios, direction)
+    pub fn serial(&self) -> Result<&str> {
+        self.info
+            .serial_number()
+            .ok_or(BladeRf2Error::ValueConversion)
     }
 
-    pub fn set_bandwidth(&mut self, direction: Direction, bandwidth: u64) -> Result<()> {
-        rfic::set_bandwidth(&mut self.nios, direction, bandwidth)
+    pub fn bandwidth_range(&self) -> RangeInclusive<u64> {
+        rfic::get_bandwidth_range()
     }
 
-    pub fn frequency(&mut self, direction: Direction) -> Result<u64> {
-        rfic::get_frequency(&mut self.nios, direction)
+    pub fn bandwidth(&self, direction: Direction) -> Result<u64> {
+        rfic::get_bandwidth(&self.nios, direction)
     }
 
-    pub fn set_frequency(&mut self, direction: Direction, frequency: u64) -> Result<()> {
-        rfic::set_frequency(&mut self.nios, direction, frequency)
+    pub fn set_bandwidth(&self, direction: Direction, bandwidth: u64) -> Result<()> {
+        rfic::set_bandwidth(&self.nios, direction, bandwidth)
     }
 
-    pub fn gain(&mut self, channel: Channel) -> Result<f64> {
-        rfic::get_gain(&mut self.nios, channel)
-    }
-    pub fn set_gain(&mut self, channel: Channel, gain: f64) -> Result<()> {
-        rfic::set_gain(&mut self.nios, channel, gain)
+    pub fn frequency_range(&self, direction: Direction) -> RangeInclusive<u64> {
+        rfic::get_frequency_range(direction)
     }
 
-    pub fn gain_mode(&mut self, channel: Channel) -> Result<GainMode> {
-        rfic::get_gain_mode(&mut self.nios, channel)
+    pub fn frequency(&self, direction: Direction) -> Result<u64> {
+        rfic::get_frequency(&self.nios, direction)
     }
 
-    pub fn set_gain_mode(&mut self, channel: Channel, mode: GainMode) -> Result<()> {
-        rfic::set_gain_mode(&mut self.nios, channel, mode)
+    pub fn set_frequency(&self, direction: Direction, frequency: u64) -> Result<()> {
+        rfic::set_frequency(&self.nios, direction, frequency)
     }
 
-    pub fn sample_rate(&mut self) -> Result<u64> {
-        rfic::get_sample_rate(&mut self.nios)
+    pub fn gain_range(&self, direction: Direction) -> Result<RangeInclusive<f64>> {
+        Ok(rfic::gain_range(&self.nios, direction)?.gain_range.clone())
     }
 
-    pub fn set_sample_rate(&mut self, sample_rate: u64) -> Result<()> {
-        rfic::set_sample_rate(&mut self.nios, sample_rate)
+    pub fn gain(&self, channel: Channel) -> Result<f64> {
+        rfic::get_gain(&self.nios, channel)
     }
 
-    pub fn set_pll_reference(&mut self, ref_freq: u64) -> Result<()> {
-        adf4002::configure_pll_reference(&mut self.nios, &self.dac, ref_freq)
+    pub fn set_gain(&self, channel: Channel, gain: f64) -> Result<()> {
+        rfic::set_gain(&self.nios, channel, gain)
     }
 
-    pub fn set_pll(&mut self, enable: bool) -> Result<()> {
+    pub fn gain_mode(&self, channel: Channel) -> Result<GainMode> {
+        rfic::get_gain_mode(&self.nios, channel)
+    }
+
+    pub fn set_gain_mode(&self, channel: Channel, mode: GainMode) -> Result<()> {
+        rfic::set_gain_mode(&self.nios, channel, mode)
+    }
+
+    pub fn sample_rate_range(&self) -> RangeInclusive<u64> {
+        rfic::get_sample_rate_range()
+    }
+
+    pub fn sample_rate(&self) -> Result<u64> {
+        rfic::get_sample_rate(&self.nios)
+    }
+
+    pub fn set_sample_rate(&self, sample_rate: u64) -> Result<()> {
+        rfic::set_sample_rate(&self.nios, sample_rate)
+    }
+
+    pub fn set_pll_reference(&self, ref_freq: u64) -> Result<()> {
+        adf4002::configure_pll_reference(&self.nios, &self.dac, ref_freq)
+    }
+
+    pub fn set_pll(&self, enable: bool) -> Result<()> {
         if enable {
-            adf4002::enable(&mut self.nios, &self.dac)
+            adf4002::enable(&self.nios, &self.dac)
         } else {
-            adf4002::disable(&mut self.nios, &self.dac)
+            adf4002::disable(&self.nios, &self.dac)
         }
     }
 
-    pub fn set_bias_tee(&mut self, direction: Direction, enable: bool) -> Result<()> {
+    pub fn set_bias_tee(&self, direction: Direction, enable: bool) -> Result<()> {
         if enable {
-            rffe::enable_bias_tee(&mut self.nios, direction)
+            rffe::enable_bias_tee(&self.nios, direction)
         } else {
-            rffe::disable_bias_tee(&mut self.nios, direction)
+            rffe::disable_bias_tee(&self.nios, direction)
         }
     }
 
-    pub fn fpga_version(&mut self) -> Result<Version> {
+    pub fn fpga_version(&self) -> Result<Version> {
         let version = self.nios.read(Nios8x32::Version, 0)?;
         Ok(version.into())
     }
 
-    pub fn timestamp(&mut self) -> Result<u64> {
+    pub fn timestamp(&self) -> Result<u64> {
         self.nios.read(Nios8x64::Timestamp, 0)
     }
 
-    pub fn loopback(&mut self) -> Result<bool> {
+    pub fn loopback(&self) -> Result<bool> {
         const MASK: u32 = 0x7 << 8;
         const LOOPBACK: u32 = 4 << 8;
 
@@ -195,7 +217,7 @@ impl BladeRf2 {
         Ok(gpio == LOOPBACK)
     }
 
-    pub fn set_loopback(&mut self, enable: bool) -> Result<()> {
+    pub fn set_loopback(&self, enable: bool) -> Result<()> {
         const MASK: u32 = 0x7 << 8;
         const LOOPBACK: u32 = 4 << 8;
 
@@ -207,11 +229,11 @@ impl BladeRf2 {
         self.nios.write(Nios8x32::Control, 0, gpio)
     }
 
-    pub fn rx_stream(&mut self, channels: &[usize]) -> Result<RxStream> {
+    pub fn rx_stream(&self, channels: &[usize]) -> Result<RxStream> {
         RxStream::new(&self.interface, &self.nios, channels)
     }
 
-    pub fn tx_stream(&mut self, channels: &[usize]) -> Result<TxStream> {
+    pub fn tx_stream(&self, channels: &[usize]) -> Result<TxStream> {
         TxStream::new(&self.interface, &self.nios, channels)
     }
 }
@@ -296,14 +318,14 @@ mod test {
 
     #[test]
     fn test_version() {
-        let mut bladerf = BladeRf2::open_any().unwrap();
+        let bladerf = BladeRf2::open_any().unwrap();
         let version = bladerf.fpga_version().unwrap();
         assert_eq!(
             version,
             Version {
                 major: 0,
-                minor: 15,
-                patch: 3
+                minor: 16,
+                patch: 0
             }
         );
     }
@@ -312,7 +334,7 @@ mod test {
     fn test_bandwidth() {
         const BW1: u64 = 1_000_000;
         const BW2: u64 = 40_000_000;
-        let mut bladerf = BladeRf2::open_any().unwrap();
+        let bladerf = BladeRf2::open_any().unwrap();
 
         bladerf.set_bandwidth(Direction::Rx, BW1).unwrap();
         bladerf.set_bandwidth(Direction::Tx, BW2).unwrap();
@@ -333,7 +355,7 @@ mod test {
     fn test_frequency() {
         const FREQ1: u64 = 920_000_000;
         const FREQ2: u64 = 433_000_000;
-        let mut bladerf = BladeRf2::open_any().unwrap();
+        let bladerf = BladeRf2::open_any().unwrap();
 
         bladerf.set_frequency(Direction::Rx, FREQ1).unwrap();
         bladerf.set_frequency(Direction::Tx, FREQ2).unwrap();
@@ -356,7 +378,7 @@ mod test {
 
     #[test]
     fn test_gain() {
-        let mut bladerf = BladeRf2::open_any().unwrap();
+        let bladerf = BladeRf2::open_any().unwrap();
         let mut stream = bladerf.rx_stream(&[0]).unwrap();
 
         let mut test_gains = |rx0: f64, rx1: f64, tx0: f64, tx1: f64| {
@@ -383,7 +405,7 @@ mod test {
 
     #[test]
     fn test_gain_mode() {
-        let mut bladerf = BladeRf2::open_any().unwrap();
+        let bladerf = BladeRf2::open_any().unwrap();
 
         bladerf
             .set_gain_mode(Channel::Rx0, GainMode::SlowAttack)
@@ -421,7 +443,7 @@ mod test {
 
     #[test]
     fn test_sample_rate() {
-        let mut bladerf = BladeRf2::open_any().unwrap();
+        let bladerf = BladeRf2::open_any().unwrap();
 
         bladerf.set_sample_rate(25_000_000).unwrap();
         let samp_rate = bladerf.sample_rate().unwrap();
@@ -447,7 +469,7 @@ mod test {
 
     #[test]
     fn test_i16_loopback() {
-        let mut bladerf = BladeRf2::open_any().unwrap();
+        let bladerf = BladeRf2::open_any().unwrap();
         bladerf.set_gain(Channel::Rx0, 0.0).unwrap();
 
         bladerf.set_loopback(true).unwrap();
@@ -471,7 +493,7 @@ mod test {
 
     #[test]
     fn test_siso_loopback() {
-        let mut bladerf = BladeRf2::open_any().unwrap();
+        let bladerf = BladeRf2::open_any().unwrap();
         bladerf.set_gain(Channel::Rx0, 0.0).unwrap();
 
         bladerf.set_loopback(true).unwrap();

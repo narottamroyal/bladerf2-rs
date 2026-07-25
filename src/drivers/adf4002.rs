@@ -8,11 +8,11 @@ const DEFAULT_REFERENCE_HZ: u64 = 10_000_000;
 const VCTCXO_HZ: u64 = 38_400_000;
 const PLL_ENABLE_BIT: u32 = 1 << 11;
 
-pub fn init(nios: &mut Nios, dac: &Ad5621) -> Result<()> {
+pub fn init(nios: &Nios, dac: &Ad5621) -> Result<()> {
     configure_pll_reference(nios, dac, DEFAULT_REFERENCE_HZ)
 }
 
-pub fn enable(nios: &mut Nios, dac: &Ad5621) -> Result<()> {
+pub fn enable(nios: &Nios, dac: &Ad5621) -> Result<()> {
     dac.disable(nios)?;
     let mut data = nios.read(Nios8x32::Control, 0)?;
     if data & PLL_ENABLE_BIT == 0 {
@@ -22,7 +22,7 @@ pub fn enable(nios: &mut Nios, dac: &Ad5621) -> Result<()> {
     Ok(())
 }
 
-pub fn disable(nios: &mut Nios, dac: &Ad5621) -> Result<()> {
+pub fn disable(nios: &Nios, dac: &Ad5621) -> Result<()> {
     let mut data = nios.read(Nios8x32::Control, 0)?;
     if data & PLL_ENABLE_BIT != 0 {
         data &= !PLL_ENABLE_BIT;
@@ -31,7 +31,7 @@ pub fn disable(nios: &mut Nios, dac: &Ad5621) -> Result<()> {
     dac.enable(nios)
 }
 
-pub fn configure_pll_reference(nios: &mut Nios, dac: &Ad5621, ref_freq: u64) -> Result<()> {
+pub fn configure_pll_reference(nios: &Nios, dac: &Ad5621, ref_freq: u64) -> Result<()> {
     let (r, n) = calculate_pll_ratio(ref_freq, VCTCXO_HZ)?;
 
     let enabled = nios.read(Nios8x32::Control, 0)? & PLL_ENABLE_BIT != 0;

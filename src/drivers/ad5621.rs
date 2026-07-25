@@ -10,7 +10,7 @@ impl Ad5621 {
         Self { dac_trim }
     }
 
-    pub fn enable(&self, nios: &mut Nios) -> Result<()> {
+    pub fn enable(&self, nios: &Nios) -> Result<()> {
         let value = nios.read(Nios8x16::Ad56x1Dac, 0)?;
         if value != self.dac_trim {
             nios.write(Nios8x16::Ad56x1Dac, 0, self.dac_trim)?;
@@ -18,7 +18,7 @@ impl Ad5621 {
         Ok(())
     }
 
-    pub fn disable(&self, nios: &mut Nios) -> Result<()> {
+    pub fn disable(&self, nios: &Nios) -> Result<()> {
         const HIGH_Z: u16 = 0xC000;
         let value = nios.read(Nios8x16::Ad56x1Dac, 0)?;
         if value != HIGH_Z {
