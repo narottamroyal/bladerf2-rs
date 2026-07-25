@@ -1,6 +1,7 @@
 use crate::Result;
 use crate::nios::{Nios, Nios8x16};
 
+#[derive(Clone)]
 pub struct Ad5621 {
     dac_trim: u16,
 }

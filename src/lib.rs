@@ -48,6 +48,7 @@ pub enum BladeRf2Error {
 
 pub type Result<T> = core::result::Result<T, BladeRf2Error>;
 
+#[derive(Clone)]
 pub struct BladeRf2 {
     info: DeviceInfo,
     interface: Interface,
@@ -101,6 +102,20 @@ impl BladeRf2 {
         {
             return Err(BladeRf2Error::UsbSpeed);
         }
+
+        // Check firmware version
+        // println!(
+        //     "{:?}",
+        //     device
+        //         .get_string_descriptor(
+        //             4.try_into().unwrap(),
+        //             US_ENGLISH,
+        //             Duration::from_millis(100)
+        //         )
+        //         .wait()
+        //         .unwrap()
+        //         .trim_end_matches('\0')
+        // );
 
         let interface = device.claim_interface(0).wait()?;
         if interface.descriptors().count() != 4 {
@@ -313,6 +328,7 @@ mod test {
     #[test]
     fn test_enumerate() {
         let devices = BladeRf2::enumerate().unwrap();
+        // println!("{devs:#?}");
         assert!(devices.len() > 0)
     }
 
@@ -320,6 +336,7 @@ mod test {
     fn test_version() {
         let bladerf = BladeRf2::open_any().unwrap();
         let version = bladerf.fpga_version().unwrap();
+        // println!("{version}");
         assert_eq!(
             version,
             Version {
@@ -529,4 +546,101 @@ mod test {
         bladerf.set_loopback(false).unwrap();
         assert!(!bladerf.loopback().unwrap());
     }
+
+    // #[test]
+    // fn test_mimo_loopback() {
+    //     let mut bladerf = BladeRf2::open_any().unwrap();
+    //     bladerf.set_gain(Channel::Rx0, 0.0).unwrap();
+
+    //     bladerf.set_loopback(true).unwrap();
+    //     assert!(bladerf.loopback().unwrap());
+
+    //     let mut rx = bladerf.rx_stream(&[0, 1]).unwrap();
+    //     let mut tx = bladerf.tx_stream(&[0, 1]).unwrap();
+    //     tx.activate().unwrap();
+    //     rx.activate().unwrap();
+
+    //     let mut tx_data0 = [Complex32::ZERO; 2048];
+    //     let mut tx_data1 = [Complex32::ZERO; 2048];
+    //     let mut rx_data0 = [Complex32::ZERO; 2048];
+    //     let mut rx_data1 = [Complex32::ZERO; 2048];
+
+    //     for pow in 1..16 {
+    //         for i in 0..tx_data0.len() {
+    //             let phase = 2.0 * std::f32::consts::PI * (i as f32) / 2.0_f32.powi(pow);
+    //             tx_data0[i] = (Complex32::I * phase).exp() * 0.5;
+    //             let phase = 2.0 * std::f32::consts::PI * (i as f32) / 2.0_f32.powi(pow * 2);
+    //             tx_data1[i] = (Complex32::I * phase).exp() * -0.25;
+    //         }
+    //         tx.write(&[&tx_data0, &tx_data1]).unwrap();
+
+    //         rx.read(&mut [&mut rx_data0, &mut rx_data1]).unwrap();
+    //         for (a, b) in tx_data0.iter().zip(rx_data0.iter()) {
+    //             const MAX_ERROR: f32 = 1.0 / 4096.0; // 2^-12
+    //             let delta = a - b;
+    //             assert!(delta.re.abs() <= MAX_ERROR, "{delta} {a} {b} {pow}");
+    //             assert!(delta.im.abs() <= MAX_ERROR);
+    //         }
+    //         for (a, b) in tx_data1.iter().zip(rx_data1.iter()) {
+    //             const MAX_ERROR: f32 = 1.0 / 4096.0; // 2^-12
+    //             let delta = a - b;
+    //             assert!(delta.re.abs() <= MAX_ERROR);
+    //             assert!(delta.im.abs() <= MAX_ERROR);
+    //         }
+    //     }
+
+    //     bladerf.set_loopback(false).unwrap();
+    //     assert!(!bladerf.loopback().unwrap());
+    // }
+
+    // #[test]
+    // fn test_stream() {
+    //     let mut bladerf = BladeRf2::open_any().unwrap();
+    //     bladerf.set_gain(Channel::Rx0, -10.0).unwrap();
+    //     bladerf.set_sample_rate(1_000_000).unwrap();
+    //     let buf = &mut [0; 2048];
+    //     let mut stream = bladerf.rx_stream().unwrap();
+    //     stream.activate().unwrap();
+    //     stream.read(buf).unwrap();
+    //     let mut t1 = u64::from_le_bytes(buf[4..12].try_into().unwrap());
+    //     for _ in 0..30 {
+    //         stream.read(buf).unwrap();
+    //         let t2 = u64::from_le_bytes(buf[4..12].try_into().unwrap());
+    //         assert_eq!(t2 - t1, 508);
+    //         t1 = t2;
+    //     }
+    // }
+
+    // #[test]
+    // fn test_bias_tee() {
+    //     let mut bladerf = BladeRf2::open_any().unwrap();
+    //     bladerf.set_bias_tee(Channel::Rx0, true).unwrap();
+    //     std::thread::sleep(Duration::from_secs(1));
+    //     bladerf.set_bias_tee(Channel::Rx0, false).unwrap();
+    //     bladerf.set_bias_tee(Channel::Tx0, true).unwrap();
+    //     std::thread::sleep(Duration::from_secs(1));
+    //     bladerf.set_bias_tee(Channel::Tx0, false).unwrap();
+    // }
+
+    // #[test]
+    // fn test_timestamp() {
+    //     let mut bladerf = BladeRf2::open_any().unwrap();
+    //     // let mut stream = bladerf.rx_stream().unwrap();
+    //     // let buf = &mut [0; 8192];
+    //     // stream.read(buf).unwrap();
+    //     let t1 = bladerf.timestamp().unwrap();
+    //     // stream.read(buf).unwrap();
+    //     let t2 = bladerf.timestamp().unwrap();
+
+    //     let t3 = bladerf.timestamp().unwrap();
+    //     println!("t1 = {t1} | t2 = {t2} | t3 = {t3}");
+    //     println!(
+    //         "{} {} {}",
+    //         t2 - t1,
+    //         t3 - t2,
+    //         (t1 + t3) as i64 - (2 * t2) as i64
+    //     );
+
+    //     assert_ne!(t1, t2);
+    // }
 }
