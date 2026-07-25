@@ -4,10 +4,10 @@ name = "bladerf2"
 version = "0.1.0"
 
 [dependencies]
-bytemuck = "1.24.0"
+bytemuck = "1.25.2"
 num-complex = { version = "0.4.6", features = ["bytemuck"] }
-nusb = "0.2.1"
-thiserror = "2.0.17"
+nusb = "0.2.5"
+thiserror = "2.0.19"
 
 [dev-dependencies]
 serial_test = "3.2.0"
