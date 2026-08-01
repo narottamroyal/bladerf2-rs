@@ -132,6 +132,7 @@ pub(crate) enum Nios8x64 {
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(crate) enum Nios16x64 {
+    Ad9361 = 0,
     RfIc = 1,
 }
 

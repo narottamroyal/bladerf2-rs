@@ -9,6 +9,7 @@ use crate::{
 };
 
 pub mod ad5621;
+pub mod ad9361;
 pub mod adf4002;
 pub mod flash;
 pub mod ina219;

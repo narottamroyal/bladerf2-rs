@@ -3,7 +3,7 @@ use std::{fmt::Display, ops::RangeInclusive};
 use thiserror::Error;
 
 use crate::{
-    drivers::{ad5621::Ad5621, adf4002, rffe, rfic},
+    drivers::{ad5621::Ad5621, ad9361, adf4002, rffe, rfic},
     nios::{Nios, Nios8x32, Nios8x64},
 };
 pub use crate::{
@@ -242,6 +242,10 @@ impl BladeRf2 {
             gpio |= LOOPBACK;
         }
         self.nios.write(Nios8x32::Control, 0, gpio)
+    }
+
+    pub fn disable_tracking_control(&self) -> Result<()> {
+        ad9361::disable_tracking_control(&self.nios)
     }
 
     pub fn rx_stream(&self, channels: &[usize]) -> Result<RxStream> {
