@@ -17,14 +17,11 @@ runs in the browser through WebUSB.
 - **Streaming.** `RxStream` and `TxStream` own their USB endpoints, so sample
   I/O never contends with configuration calls.
 
-It is also the bladeRF 2.0 backend of [seify](https://github.com/FutureSDR/seify)
-and therefore usable from [FutureSDR](https://www.futuresdr.org).
-
 ## Usage
 
 ```toml
 [dependencies]
-bladerf2 = "0.2"
+bladerf2 = "0.1"
 ```
 
 ### Blocking
