@@ -1,13 +1,39 @@
 [package]
-edition = "2024"
 name = "bladerf2"
 version = "0.1.0"
+edition = "2024"
+description = "Pure Rust bladeRF 2.0 micro driver on nusb with blocking and async interfaces, including WebUSB"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/narottamroyal/bladerf2-rs"
+readme = "README.md"
+keywords = ["sdr", "bladerf", "usb", "webusb", "radio"]
+
+[features]
+default = []
+# Native async: enable exactly one so nusb can run blocking USB calls on a
+# runtime. The blocking `.wait()` API needs neither, and neither does wasm.
+smol = ["nusb/smol"]
+tokio = ["nusb/tokio"]
 
 [dependencies]
-bytemuck = "1.25.2"
-num-complex = { version = "0.4.6", features = ["bytemuck"] }
-nusb = "0.2.5"
-thiserror = "2.0.19"
+bytemuck = "1"
+futures-lite = "2"
+# The wasm-bindgen feature swaps in browser timers on wasm; inert on native.
+futures-timer = { version = "3", features = ["wasm-bindgen"] }
+nusb = "0.2.8"
+num-complex = { version = "0.4", features = ["bytemuck"] }
+thiserror = "2"
+tracing = "0.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
 
 [dev-dependencies]
-serial_test = "3.2.0"
+serial_test = "3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+smol = "2"
+
+[[example]]
+name = "rx_async"
+required-features = ["smol"]

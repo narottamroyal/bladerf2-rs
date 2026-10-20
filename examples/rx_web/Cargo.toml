@@ -1,0 +1,28 @@
+[package]
+name = "rx_web"
+version = "0.0.0"
+edition = "2024"
+description = "bladerf2 WebUSB example (run with `trunk serve`)"
+publish = false
+
+[dependencies]
+bladerf2 = { path = "../.." }
+num-complex = "0.4"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Element",
+    "EventTarget",
+    "HtmlElement",
+    "Navigator",
+    "Node",
+    "Usb",
+    "UsbDeviceFilter",
+    "UsbDeviceRequestOptions",
+    "Window",
+    "console",
+] }
+
+# Standalone package: not a member of the `bladerf2` crate it demonstrates.
+[workspace]
