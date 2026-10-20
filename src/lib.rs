@@ -1,270 +1,260 @@
-use nusb::{DeviceInfo, Interface, MaybeFuture, Speed, list_devices, transfer::TransferError};
-use std::{fmt::Display, ops::RangeInclusive};
-use thiserror::Error;
+//! Pure Rust driver for the [bladeRF 2.0 micro] software-defined radio.
+//!
+//! The driver talks to the radio directly over USB using [`nusb`], so it needs
+//! no `libbladeRF` or other native library, and it runs unchanged in the
+//! browser through WebUSB.
+//!
+//! # Blocking and async
+//!
+//! Every operation that touches the device returns a [`MaybeFuture`]:
+//!
+//! * call `.wait()` to block the current thread (native targets only, no async
+//!   runtime required), or
+//! * `.await` it from async code.
+//!
+//! On native targets, `.await` needs one of the `smol` or `tokio` cargo
+//! features so that nusb can run blocking USB calls on a runtime. On
+//! `wasm32-unknown-unknown` nothing extra is needed: all I/O goes through
+//! WebUSB and only the async API is available.
+//!
+//! # Quick start (blocking)
+//!
+//! ```no_run
+//! use bladerf2::{BladeRf2, Direction, MaybeFuture};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut dev = BladeRf2::open_any()?;
+//! println!("serial {}, FPGA {}", dev.serial()?, dev.fpga_version().wait()?);
+//!
+//! let rf = dev.rf_link_session();
+//! rf.set_frequency(Direction::Rx, 915_000_000).wait()?;
+//! rf.set_sample_rate(10_000_000).wait()?;
+//!
+//! let mut rx = rf.rx_stream(&[0])?;
+//! rx.activate().wait()?;
+//! let mut samples = vec![num_complex::Complex32::ZERO; rx.mtu()];
+//! rx.read(&mut [&mut samples], None)?;
+//! rx.deactivate().wait()?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Quick start (async, any target)
+//!
+//! Finding a device is the one place where native and browser differ. On
+//! native targets every attached radio is listed; in the browser the page must
+//! first ask the user for permission with `navigator.usb.requestDevice`, after
+//! which [`BladeRf2::list_devices`] returns the granted radios.
+//!
+//! ```no_run
+//! use bladerf2::{BladeRf2, Direction};
+//!
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let info = BladeRf2::list_devices().await?.into_iter().next().ok_or("no device")?;
+//! let mut dev = BladeRf2::open_device(info).await?;
+//!
+//! let rf = dev.rf_link_session();
+//! rf.set_frequency(Direction::Rx, 915_000_000).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Sessions and streams
+//!
+//! Configuration (frequency, gain, sample rate, ...) goes through an
+//! [`RfLinkSession`] obtained from [`BladeRf2::rf_link_session`]. The session
+//! borrows the device mutably, so the compiler guarantees that at most one
+//! session exists at a time.
+//!
+//! Sample streams ([`RxStream`], [`TxStream`]) are created from a session but
+//! own everything they need, so they stay valid after the session is dropped
+//! and can be moved to another thread or task. Always call `deactivate` when
+//! finished: dropping an active stream only deactivates it on a best-effort
+//! basis (on wasm, asynchronously).
+//!
+//! # Examples
+//!
+//! The `examples` directory has near-identical `rx_sync`, `rx_async` and
+//! `rx_web` programs that print device information, change and read back every
+//! setting, and receive samples.
+//!
+//! [bladeRF 2.0 micro]: https://www.nuand.com/bladerf-2-0-micro/
 
-use crate::{
-    drivers::{ad5621::Ad5621, ad9361, adf4002, rffe, rfic},
-    nios::{Nios, Nios8x32, Nios8x64},
-};
-pub use crate::{
-    rfic::GainMode,
-    stream::{RxStream, TxStream},
-};
+#![deny(missing_docs)]
+#![deny(missing_debug_implementations)]
+
+pub mod channel;
+pub mod error;
+pub mod stream;
 
 mod drivers;
+mod maybe_future;
 mod nios;
-mod stream;
+mod session;
 mod usb;
 
-#[derive(Debug, Error)]
-pub enum BladeRf2Error {
-    #[error("No device found")]
-    NoDeviceFound,
-    #[error("Invalid USB speed")]
-    UsbSpeed,
-    #[error("USB error: {0}")]
-    Usb(#[from] nusb::Error),
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("Transfer error: {0}")]
-    Transfer(#[from] TransferError),
-    #[error("Firmware version not supported")]
-    IncompatibleFirmware,
-    #[error("Nios transfer unsuccessful")]
-    Nios,
-    #[error("Unable to convert value")]
-    ValueConversion,
-    #[error("Timeout")]
-    Timeout,
-    #[error("Out of range")]
-    OutOfRange,
-    #[error("PLL divider solution not found")]
-    PllDividerRatio,
-    #[error("USB vendor command enable failed")]
-    UsbVendor,
-    #[error("Invalid channel configuration")]
-    ChannelConfig,
-}
+pub use channel::{Channel, Direction};
+pub use drivers::rfic::{GainMode, GainRange};
+pub use error::{Error, Result};
+pub use nusb::{DeviceInfo, MaybeFuture};
+pub use session::RfLinkSession;
+pub use stream::{RxStream, TxStream};
 
-pub type Result<T> = core::result::Result<T, BladeRf2Error>;
+use drivers::ad5621::Ad5621;
+use nios::{Nios8x32, NiosCore};
+use usb::UsbTransport;
 
-#[derive(Clone)]
+/// Handle to a bladeRF 2.0 micro.
+///
+/// Obtain one with [`BladeRf2::open_any`] / [`BladeRf2::open_serial`]
+/// (blocking, native only) or [`BladeRf2::list_devices`] followed by
+/// [`BladeRf2::open_device`] (blocking or async, all targets).
+///
+/// The handle exposes read-only device information; everything that changes
+/// radio state goes through [`BladeRf2::rf_link_session`].
+#[derive(Debug)]
 pub struct BladeRf2 {
-    info: DeviceInfo,
-    interface: Interface,
-    nios: Nios,
+    transport: UsbTransport,
+    nios: NiosCore,
     dac: Ad5621,
 }
 
 impl BladeRf2 {
-    const VID: u16 = 0x2CF0;
-    const PID: u16 = 0x5250;
+    /// USB vendor ID of Nuand devices.
+    pub const VID: u16 = 0x2CF0;
+    /// USB product ID of the bladeRF 2.0 micro.
+    pub const PID: u16 = 0x5250;
 
-    pub fn enumerate() -> Result<Vec<DeviceInfo>> {
-        let devices = list_devices()
-            .wait()?
-            .filter(|dev| {
-                dev.vendor_id() == Self::VID
-                    && dev.product_id() == Self::PID
-                    && dev.product_string() == Some("bladeRF 2.0")
-            })
-            .collect();
-        Ok(devices)
+    fn is_bladerf2(info: &DeviceInfo) -> bool {
+        info.vendor_id() == Self::VID
+            && info.product_id() == Self::PID
+            && info.product_string() == Some("bladeRF 2.0")
     }
 
-    pub fn open_any() -> Result<Self> {
-        let devices = Self::enumerate()?;
-        let info = devices.first().ok_or(BladeRf2Error::NoDeviceFound)?;
-        Self::open(info.clone())
+    /// List the bladeRF 2.0 devices this process can open.
+    ///
+    /// On native targets this is every attached device. In the browser it is
+    /// only the devices the user has granted to the page through
+    /// `navigator.usb.requestDevice`.
+    pub fn list_devices() -> impl MaybeFuture<Output = Result<Vec<DeviceInfo>>> {
+        maybe_future::operation(async {
+            let devices = maybe_future::usb(nusb::list_devices()).await?;
+            Ok(devices.filter(Self::is_bladerf2).collect())
+        })
     }
 
-    pub fn open_serial(serial: &str) -> Result<Self> {
-        let devices = Self::enumerate()?;
-        let info = devices
-            .iter()
-            .find(|dev| {
-                if let Some(s) = dev.serial_number() {
-                    s.starts_with(serial)
-                } else {
-                    false
-                }
-            })
-            .ok_or(BladeRf2Error::NoDeviceFound)?;
-        Self::open(info.clone())
+    /// Open the device described by `info` and initialize the radio.
+    ///
+    /// Requires USB 3.0 SuperSpeed where the platform reports the link speed
+    /// (WebUSB does not). After power-up the firmware can take a few seconds
+    /// to load the FPGA; this call waits for it.
+    pub fn open_device(info: DeviceInfo) -> impl MaybeFuture<Output = Result<Self>> {
+        maybe_future::operation(Self::open_inner(info))
     }
 
-    pub fn open(info: DeviceInfo) -> Result<Self> {
-        let device = info.open().wait()?;
+    async fn open_inner(info: DeviceInfo) -> Result<Self> {
+        let device = maybe_future::usb(info.open()).await?;
 
-        // Check device speed
         if let Some(speed) = device.speed()
-            && speed != Speed::Super
+            && speed != nusb::Speed::Super
         {
-            return Err(BladeRf2Error::UsbSpeed);
+            return Err(Error::UsbSpeed);
         }
 
-        // Check firmware version
-        // println!(
-        //     "{:?}",
-        //     device
-        //         .get_string_descriptor(
-        //             4.try_into().unwrap(),
-        //             US_ENGLISH,
-        //             Duration::from_millis(100)
-        //         )
-        //         .wait()
-        //         .unwrap()
-        //         .trim_end_matches('\0')
-        // );
+        let interface = maybe_future::usb(device.claim_interface(0)).await?;
 
-        let interface = device.claim_interface(0).wait()?;
+        // The RF-link firmware exposes exactly four alternate settings.
         if interface.descriptors().count() != 4 {
-            return Err(BladeRf2Error::IncompatibleFirmware);
+            return Err(Error::IncompatibleFirmware);
         }
 
-        let (nios, dac) = drivers::init(&interface)?;
-
+        let transport = UsbTransport::new(interface, info);
+        let (nios, dac) = drivers::init(&transport).await?;
         Ok(Self {
-            info,
-            interface,
+            transport,
             nios,
             dac,
         })
     }
 
+    /// List all attached bladeRF 2.0 devices (blocking, native only).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn enumerate() -> Result<Vec<DeviceInfo>> {
+        Self::list_devices().wait()
+    }
+
+    /// Open the first attached bladeRF 2.0 (blocking, native only).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_any() -> Result<Self> {
+        let info = Self::enumerate()?
+            .into_iter()
+            .next()
+            .ok_or(Error::NoDeviceFound)?;
+        Self::open(info)
+    }
+
+    /// Open the bladeRF 2.0 whose serial number starts with `serial`
+    /// (blocking, native only).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_serial(serial: &str) -> Result<Self> {
+        let info = Self::enumerate()?
+            .into_iter()
+            .find(|dev| dev.serial_number().is_some_and(|s| s.starts_with(serial)))
+            .ok_or(Error::NoDeviceFound)?;
+        Self::open(info)
+    }
+
+    /// Open the device described by `info` (blocking, native only).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open(info: DeviceInfo) -> Result<Self> {
+        Self::open_device(info).wait()
+    }
+
+    /// USB serial number of the device.
     pub fn serial(&self) -> Result<&str> {
-        self.info
+        self.transport
+            .info()
             .serial_number()
-            .ok_or(BladeRf2Error::ValueConversion)
+            .ok_or(Error::ValueConversion)
     }
 
-    pub fn bandwidth_range(&self) -> RangeInclusive<u64> {
-        rfic::get_bandwidth_range()
+    /// Version of the FPGA bitstream.
+    pub fn fpga_version(&self) -> impl MaybeFuture<Output = Result<Version>> + '_ {
+        maybe_future::operation(async {
+            let raw: u32 = self.nios.read(Nios8x32::Version, 0).await?;
+            Ok(Version::from(raw))
+        })
     }
 
-    pub fn bandwidth(&self, direction: Direction) -> Result<u64> {
-        rfic::get_bandwidth(&self.nios, direction)
+    /// VCTCXO DAC trim value read from the device's flash at open time.
+    ///
+    /// This is the factory calibration of the 38.4 MHz reference oscillator.
+    pub fn vctcxo_trim(&self) -> u16 {
+        self.dac.trim_value()
     }
 
-    pub fn set_bandwidth(&self, direction: Direction, bandwidth: u64) -> Result<()> {
-        rfic::set_bandwidth(&self.nios, direction, bandwidth)
-    }
-
-    pub fn frequency_range(&self, direction: Direction) -> RangeInclusive<u64> {
-        rfic::get_frequency_range(direction)
-    }
-
-    pub fn frequency(&self, direction: Direction) -> Result<u64> {
-        rfic::get_frequency(&self.nios, direction)
-    }
-
-    pub fn set_frequency(&self, direction: Direction, frequency: u64) -> Result<()> {
-        rfic::set_frequency(&self.nios, direction, frequency)
-    }
-
-    pub fn gain_range(&self, direction: Direction) -> Result<RangeInclusive<f64>> {
-        Ok(rfic::gain_range(&self.nios, direction)?.gain_range.clone())
-    }
-
-    pub fn gain(&self, channel: Channel) -> Result<f64> {
-        rfic::get_gain(&self.nios, channel)
-    }
-
-    pub fn set_gain(&self, channel: Channel, gain: f64) -> Result<()> {
-        rfic::set_gain(&self.nios, channel, gain)
-    }
-
-    pub fn gain_mode(&self, channel: Channel) -> Result<GainMode> {
-        rfic::get_gain_mode(&self.nios, channel)
-    }
-
-    pub fn set_gain_mode(&self, channel: Channel, mode: GainMode) -> Result<()> {
-        rfic::set_gain_mode(&self.nios, channel, mode)
-    }
-
-    pub fn sample_rate_range(&self) -> RangeInclusive<u64> {
-        rfic::get_sample_rate_range()
-    }
-
-    pub fn sample_rate(&self) -> Result<u64> {
-        rfic::get_sample_rate(&self.nios)
-    }
-
-    pub fn set_sample_rate(&self, sample_rate: u64) -> Result<()> {
-        rfic::set_sample_rate(&self.nios, sample_rate)
-    }
-
-    pub fn set_pll_reference(&self, ref_freq: u64) -> Result<()> {
-        adf4002::configure_pll_reference(&self.nios, &self.dac, ref_freq)
-    }
-
-    pub fn set_pll(&self, enable: bool) -> Result<()> {
-        if enable {
-            adf4002::enable(&self.nios, &self.dac)
-        } else {
-            adf4002::disable(&self.nios, &self.dac)
-        }
-    }
-
-    pub fn set_bias_tee(&self, direction: Direction, enable: bool) -> Result<()> {
-        if enable {
-            rffe::enable_bias_tee(&self.nios, direction)
-        } else {
-            rffe::disable_bias_tee(&self.nios, direction)
-        }
-    }
-
-    pub fn fpga_version(&self) -> Result<Version> {
-        let version = self.nios.read(Nios8x32::Version, 0)?;
-        Ok(version.into())
-    }
-
-    pub fn timestamp(&self) -> Result<u64> {
-        self.nios.read(Nios8x64::Timestamp, 0)
-    }
-
-    pub fn loopback(&self) -> Result<bool> {
-        const MASK: u32 = 0x7 << 8;
-        const LOOPBACK: u32 = 4 << 8;
-
-        let mut gpio = self.nios.read(Nios8x32::Control, 0)?;
-        gpio &= MASK;
-        Ok(gpio == LOOPBACK)
-    }
-
-    pub fn set_loopback(&self, enable: bool) -> Result<()> {
-        const MASK: u32 = 0x7 << 8;
-        const LOOPBACK: u32 = 4 << 8;
-
-        let mut gpio = self.nios.read(Nios8x32::Control, 0)?;
-        gpio &= !MASK;
-        if enable {
-            gpio |= LOOPBACK;
-        }
-        self.nios.write(Nios8x32::Control, 0, gpio)
-    }
-
-    pub fn disable_tracking_control(&self) -> Result<()> {
-        ad9361::disable_tracking_control(&self.nios)
-    }
-
-    pub fn rx_stream(&self, channels: &[usize]) -> Result<RxStream> {
-        RxStream::new(&self.interface, &self.nios, channels)
-    }
-
-    pub fn tx_stream(&self, channels: &[usize]) -> Result<TxStream> {
-        TxStream::new(&self.interface, &self.nios, channels)
+    /// Start an [`RfLinkSession`] for configuring the radio and creating
+    /// sample streams.
+    ///
+    /// The session borrows the device mutably, so only one can exist at a
+    /// time; the device is usable again once the session is dropped.
+    pub fn rf_link_session(&mut self) -> RfLinkSession<'_> {
+        RfLinkSession::new(&self.transport, &self.nios, &self.dac)
     }
 }
 
-#[derive(Debug, PartialEq)]
+/// Semantic version of the FPGA bitstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Version {
-    major: u8,
-    minor: u8,
-    patch: u16,
+    /// Major version.
+    pub major: u8,
+    /// Minor version.
+    pub minor: u8,
+    /// Patch version.
+    pub patch: u16,
 }
 
-impl Display for Version {
+impl std::fmt::Display for Version {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
     }
@@ -276,375 +266,28 @@ impl From<u32> for Version {
         Self {
             major: bytes[0],
             minor: bytes[1],
-            patch: u16::from_le_bytes(bytes[2..=3].try_into().unwrap()),
-        }
-    }
-}
-
-#[repr(u16)]
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Channel {
-    Rx0 = 0,
-    Tx0 = 1,
-    Rx1 = 2,
-    Tx1 = 3,
-}
-
-impl From<Channel> for u16 {
-    fn from(value: Channel) -> Self {
-        value as u16
-    }
-}
-
-impl From<Channel> for Direction {
-    fn from(value: Channel) -> Self {
-        match value {
-            Channel::Rx0 | Channel::Rx1 => Direction::Rx,
-            Channel::Tx0 | Channel::Tx1 => Direction::Tx,
-        }
-    }
-}
-
-#[repr(u16)]
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    Rx = 0,
-    Tx = 1,
-}
-
-impl From<Direction> for u16 {
-    fn from(value: Direction) -> Self {
-        match value {
-            Direction::Rx => Channel::Rx0.into(),
-            Direction::Tx => Channel::Tx0.into(),
+            patch: u16::from_le_bytes([bytes[2], bytes[3]]),
         }
     }
 }
 
 #[cfg(test)]
-#[serial_test::serial]
-mod test {
+mod tests {
     use super::*;
-    use num_complex::Complex32;
 
     #[test]
-    fn test_enumerate() {
-        let devices = BladeRf2::enumerate().unwrap();
-        // println!("{devs:#?}");
-        assert!(devices.len() > 0)
-    }
-
-    #[test]
-    fn test_version() {
-        let bladerf = BladeRf2::open_any().unwrap();
-        let version = bladerf.fpga_version().unwrap();
-        // println!("{version}");
-        assert_eq!(
-            version,
-            Version {
-                major: 0,
-                minor: 16,
-                patch: 0
-            }
-        );
-    }
-
-    #[test]
-    fn test_bandwidth() {
-        const BW1: u64 = 1_000_000;
-        const BW2: u64 = 40_000_000;
-        let bladerf = BladeRf2::open_any().unwrap();
-
-        bladerf.set_bandwidth(Direction::Rx, BW1).unwrap();
-        bladerf.set_bandwidth(Direction::Tx, BW2).unwrap();
-        let rx = bladerf.bandwidth(Direction::Rx).unwrap();
-        let tx = bladerf.bandwidth(Direction::Tx).unwrap();
-        assert_eq!(rx, BW1);
-        assert_eq!(tx, BW2);
-
-        bladerf.set_bandwidth(Direction::Rx, BW2).unwrap();
-        bladerf.set_bandwidth(Direction::Tx, BW1).unwrap();
-        let rx = bladerf.bandwidth(Direction::Rx).unwrap();
-        let tx = bladerf.bandwidth(Direction::Tx).unwrap();
-        assert_eq!(rx, BW2);
-        assert_eq!(tx, BW1);
-    }
-
-    #[test]
-    fn test_frequency() {
-        const FREQ1: u64 = 920_000_000;
-        const FREQ2: u64 = 433_000_000;
-        let bladerf = BladeRf2::open_any().unwrap();
-
-        bladerf.set_frequency(Direction::Rx, FREQ1).unwrap();
-        bladerf.set_frequency(Direction::Tx, FREQ2).unwrap();
-        let freq = bladerf.frequency(Direction::Rx).unwrap();
-        let delta = (freq as f64 - FREQ1 as f64).abs();
-        assert!(delta < 5.0);
-        let freq = bladerf.frequency(Direction::Tx).unwrap();
-        let delta = (freq as f64 - FREQ2 as f64).abs();
-        assert!(delta < 5.0);
-
-        bladerf.set_frequency(Direction::Rx, FREQ2).unwrap();
-        bladerf.set_frequency(Direction::Tx, FREQ1).unwrap();
-        let freq = bladerf.frequency(Direction::Rx).unwrap();
-        let delta = (freq as f64 - FREQ2 as f64).abs();
-        assert!(delta < 5.0);
-        let freq = bladerf.frequency(Direction::Tx).unwrap();
-        let delta = (freq as f64 - FREQ1 as f64).abs();
-        assert!(delta < 5.0);
-    }
-
-    #[test]
-    fn test_gain() {
-        let bladerf = BladeRf2::open_any().unwrap();
-        let mut stream = bladerf.rx_stream(&[0]).unwrap();
-
-        let mut test_gains = |rx0: f64, rx1: f64, tx0: f64, tx1: f64| {
-            bladerf.set_gain(Channel::Rx0, rx0).unwrap();
-            bladerf.set_gain(Channel::Rx1, rx1).unwrap();
-            bladerf.set_gain(Channel::Tx0, tx0).unwrap();
-            bladerf.set_gain(Channel::Tx1, tx1).unwrap();
-
-            // Required to update reported RX gains
-            stream.activate().unwrap();
-
-            assert_eq!(bladerf.gain(Channel::Rx0).unwrap(), rx0);
-            assert_eq!(bladerf.gain(Channel::Rx1).unwrap(), rx1);
-            assert_eq!(bladerf.gain(Channel::Tx0).unwrap(), tx0);
-            assert_eq!(bladerf.gain(Channel::Tx1).unwrap(), tx1);
+    fn test_version_display() {
+        let version = Version {
+            major: 0,
+            minor: 16,
+            patch: 0,
         };
-
-        test_gains(50.0, 40.0, 30.0, 20.0);
-        test_gains(20.0, 30.0, 40.0, 50.0);
-
-        // Set to default gains
-        test_gains(60.0, 60.0, 56.0, 56.0);
+        assert_eq!(version.to_string(), "0.16.0");
     }
 
     #[test]
-    fn test_gain_mode() {
-        let bladerf = BladeRf2::open_any().unwrap();
-
-        bladerf
-            .set_gain_mode(Channel::Rx0, GainMode::SlowAttack)
-            .unwrap();
-        bladerf
-            .set_gain_mode(Channel::Rx1, GainMode::Manual)
-            .unwrap();
-        let mode1 = bladerf.gain_mode(Channel::Rx0).unwrap();
-        let mode2 = bladerf.gain_mode(Channel::Rx1).unwrap();
-        assert_eq!(mode1, GainMode::SlowAttack);
-        assert_eq!(mode2, GainMode::Manual);
-
-        bladerf
-            .set_gain_mode(Channel::Rx0, GainMode::FastAttack)
-            .unwrap();
-        bladerf
-            .set_gain_mode(Channel::Rx1, GainMode::Hybrid)
-            .unwrap();
-        let mode1 = bladerf.gain_mode(Channel::Rx0).unwrap();
-        let mode2 = bladerf.gain_mode(Channel::Rx1).unwrap();
-        assert_eq!(mode1, GainMode::FastAttack);
-        assert_eq!(mode2, GainMode::Hybrid);
-
-        bladerf
-            .set_gain_mode(Channel::Rx0, GainMode::default())
-            .unwrap();
-        bladerf
-            .set_gain_mode(Channel::Rx1, GainMode::default())
-            .unwrap();
-        let mode1 = bladerf.gain_mode(Channel::Rx0).unwrap();
-        let mode2 = bladerf.gain_mode(Channel::Rx1).unwrap();
-        assert_eq!(mode1, GainMode::SlowAttack);
-        assert_eq!(mode2, GainMode::SlowAttack);
+    fn test_version_from_u32() {
+        let version = Version::from(0x0000_1000);
+        assert_eq!((version.major, version.minor, version.patch), (0, 16, 0));
     }
-
-    #[test]
-    fn test_sample_rate() {
-        let bladerf = BladeRf2::open_any().unwrap();
-
-        bladerf.set_sample_rate(25_000_000).unwrap();
-        let samp_rate = bladerf.sample_rate().unwrap();
-        assert_eq!(samp_rate, 25_000_000);
-
-        // Check for bug that occurs when switching between high and low sample rates
-        bladerf.set_sample_rate(50_000_000).unwrap();
-        let samp_rate = bladerf.sample_rate().unwrap();
-        assert_eq!(samp_rate, 50_000_000);
-
-        bladerf.set_sample_rate(2_083_334).unwrap();
-        let samp_rate = bladerf.sample_rate().unwrap();
-        assert_eq!(samp_rate, 2_083_334);
-
-        bladerf.set_sample_rate(40_000_001).unwrap();
-        let samp_rate = bladerf.sample_rate().unwrap();
-        assert_eq!(samp_rate, 40_000_001);
-
-        bladerf.set_sample_rate(2_083_332).unwrap();
-        let samp_rate = bladerf.sample_rate().unwrap();
-        assert_eq!(samp_rate, 2_083_332);
-    }
-
-    #[test]
-    fn test_i16_loopback() {
-        let bladerf = BladeRf2::open_any().unwrap();
-        bladerf.set_gain(Channel::Rx0, 0.0).unwrap();
-
-        bladerf.set_loopback(true).unwrap();
-        assert!(bladerf.loopback().unwrap());
-
-        let mut rx = bladerf.rx_stream(&[0]).unwrap();
-        let mut tx = bladerf.tx_stream(&[0]).unwrap();
-        tx.activate().unwrap();
-        rx.activate().unwrap();
-
-        // Check i16 loopback
-        let tx_data = &mut std::array::from_fn::<_, 4096, _>(|i| i as i16 - 2048);
-        let rx_data = &mut [0; 4096];
-        tx.write_i16(tx_data).unwrap();
-        rx.read_i16(rx_data).unwrap();
-        assert!(tx_data.iter().zip(rx_data.iter()).all(|(x, y)| x == y));
-
-        bladerf.set_loopback(false).unwrap();
-        assert!(!bladerf.loopback().unwrap());
-    }
-
-    #[test]
-    fn test_siso_loopback() {
-        let bladerf = BladeRf2::open_any().unwrap();
-        bladerf.set_gain(Channel::Rx0, 0.0).unwrap();
-
-        bladerf.set_loopback(true).unwrap();
-        assert!(bladerf.loopback().unwrap());
-
-        let mut rx = bladerf.rx_stream(&[0]).unwrap();
-        let mut tx = bladerf.tx_stream(&[0]).unwrap();
-        tx.activate().unwrap();
-        rx.activate().unwrap();
-
-        let mut tx_data = [Complex32::ZERO; 4096];
-        let mut rx_data = [Complex32::ZERO; 4096];
-
-        for pow in 1..16 {
-            // Generate complex sinusoidal data
-            for i in 0..tx_data.len() {
-                let phase = 2.0 * std::f32::consts::PI * (i as f32) / 2.0_f32.powi(pow);
-                tx_data[i] = (Complex32::I * phase).exp() * 0.5;
-            }
-
-            tx.write(&[&tx_data]).unwrap();
-            rx.read(&mut [&mut rx_data]).unwrap();
-
-            // Check loopback data
-            for (a, b) in tx_data.iter().zip(rx_data.iter()) {
-                const MAX_ERROR: f32 = 1.0 / 4096.0; // 2^-12
-                let delta = a - b;
-                assert!(delta.re.abs() <= MAX_ERROR);
-                assert!(delta.im.abs() <= MAX_ERROR);
-            }
-        }
-
-        bladerf.set_loopback(false).unwrap();
-        assert!(!bladerf.loopback().unwrap());
-    }
-
-    // #[test]
-    // fn test_mimo_loopback() {
-    //     let mut bladerf = BladeRf2::open_any().unwrap();
-    //     bladerf.set_gain(Channel::Rx0, 0.0).unwrap();
-
-    //     bladerf.set_loopback(true).unwrap();
-    //     assert!(bladerf.loopback().unwrap());
-
-    //     let mut rx = bladerf.rx_stream(&[0, 1]).unwrap();
-    //     let mut tx = bladerf.tx_stream(&[0, 1]).unwrap();
-    //     tx.activate().unwrap();
-    //     rx.activate().unwrap();
-
-    //     let mut tx_data0 = [Complex32::ZERO; 2048];
-    //     let mut tx_data1 = [Complex32::ZERO; 2048];
-    //     let mut rx_data0 = [Complex32::ZERO; 2048];
-    //     let mut rx_data1 = [Complex32::ZERO; 2048];
-
-    //     for pow in 1..16 {
-    //         for i in 0..tx_data0.len() {
-    //             let phase = 2.0 * std::f32::consts::PI * (i as f32) / 2.0_f32.powi(pow);
-    //             tx_data0[i] = (Complex32::I * phase).exp() * 0.5;
-    //             let phase = 2.0 * std::f32::consts::PI * (i as f32) / 2.0_f32.powi(pow * 2);
-    //             tx_data1[i] = (Complex32::I * phase).exp() * -0.25;
-    //         }
-    //         tx.write(&[&tx_data0, &tx_data1]).unwrap();
-
-    //         rx.read(&mut [&mut rx_data0, &mut rx_data1]).unwrap();
-    //         for (a, b) in tx_data0.iter().zip(rx_data0.iter()) {
-    //             const MAX_ERROR: f32 = 1.0 / 4096.0; // 2^-12
-    //             let delta = a - b;
-    //             assert!(delta.re.abs() <= MAX_ERROR, "{delta} {a} {b} {pow}");
-    //             assert!(delta.im.abs() <= MAX_ERROR);
-    //         }
-    //         for (a, b) in tx_data1.iter().zip(rx_data1.iter()) {
-    //             const MAX_ERROR: f32 = 1.0 / 4096.0; // 2^-12
-    //             let delta = a - b;
-    //             assert!(delta.re.abs() <= MAX_ERROR);
-    //             assert!(delta.im.abs() <= MAX_ERROR);
-    //         }
-    //     }
-
-    //     bladerf.set_loopback(false).unwrap();
-    //     assert!(!bladerf.loopback().unwrap());
-    // }
-
-    // #[test]
-    // fn test_stream() {
-    //     let mut bladerf = BladeRf2::open_any().unwrap();
-    //     bladerf.set_gain(Channel::Rx0, -10.0).unwrap();
-    //     bladerf.set_sample_rate(1_000_000).unwrap();
-    //     let buf = &mut [0; 2048];
-    //     let mut stream = bladerf.rx_stream().unwrap();
-    //     stream.activate().unwrap();
-    //     stream.read(buf).unwrap();
-    //     let mut t1 = u64::from_le_bytes(buf[4..12].try_into().unwrap());
-    //     for _ in 0..30 {
-    //         stream.read(buf).unwrap();
-    //         let t2 = u64::from_le_bytes(buf[4..12].try_into().unwrap());
-    //         assert_eq!(t2 - t1, 508);
-    //         t1 = t2;
-    //     }
-    // }
-
-    // #[test]
-    // fn test_bias_tee() {
-    //     let mut bladerf = BladeRf2::open_any().unwrap();
-    //     bladerf.set_bias_tee(Channel::Rx0, true).unwrap();
-    //     std::thread::sleep(Duration::from_secs(1));
-    //     bladerf.set_bias_tee(Channel::Rx0, false).unwrap();
-    //     bladerf.set_bias_tee(Channel::Tx0, true).unwrap();
-    //     std::thread::sleep(Duration::from_secs(1));
-    //     bladerf.set_bias_tee(Channel::Tx0, false).unwrap();
-    // }
-
-    // #[test]
-    // fn test_timestamp() {
-    //     let mut bladerf = BladeRf2::open_any().unwrap();
-    //     // let mut stream = bladerf.rx_stream().unwrap();
-    //     // let buf = &mut [0; 8192];
-    //     // stream.read(buf).unwrap();
-    //     let t1 = bladerf.timestamp().unwrap();
-    //     // stream.read(buf).unwrap();
-    //     let t2 = bladerf.timestamp().unwrap();
-
-    //     let t3 = bladerf.timestamp().unwrap();
-    //     println!("t1 = {t1} | t2 = {t2} | t3 = {t3}");
-    //     println!(
-    //         "{} {} {}",
-    //         t2 - t1,
-    //         t3 - t2,
-    //         (t1 + t3) as i64 - (2 * t2) as i64
-    //     );
-
-    //     assert_ne!(t1, t2);
-    // }
 }
