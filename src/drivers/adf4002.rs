@@ -1,76 +1,107 @@
 //! ADF4002 PLL reference clock control.
 //!
-//! Generates the AD9361 reference clock from the board's VCTCXO. Register
-//! encoding ported from libbladeRF's `adf400x.c`.
+//! Locks the board's VCTCXO to an external reference on REFIN.
+//!
+//! The reference frequency is `VCTCXO × R / N`, so it is read back from the R
+//! and N divider registers rather than stored. The dividers are integers, so
+//! the value read back can differ slightly from the one requested.
+
+use std::ops::RangeInclusive;
 
 use crate::drivers::ad5621::Ad5621;
 use crate::error::{Error, Result};
 use crate::nios::{Nios8x32, NiosCore};
 
-const DEFAULT_REFERENCE_HZ: u64 = 10_000_000;
+/// Reference frequency programmed at power-up, in Hz.
+const DEFAULT_REFCLK_HZ: u64 = 10_000_000;
+/// Reference frequencies the PLL accepts, in Hz.
+pub(crate) const REFCLK_RANGE: RangeInclusive<u64> = 5_000_000..=300_000_000;
+
 const VCTCXO_HZ: u64 = 38_400_000;
 const PLL_ENABLE_BIT: u32 = 1 << 11;
 
-/// Initialize the PLL with the default 10 MHz reference.
+/// Program the power-up reference frequency.
 pub async fn init(nios: &NiosCore, dac: &Ad5621) -> Result<()> {
-    configure_pll_reference(nios, dac, DEFAULT_REFERENCE_HZ).await
+    set_refclk(nios, dac, DEFAULT_REFCLK_HZ).await
 }
 
-/// Power up the PLL (DAC output is tristated while the PLL drives the ref).
-pub async fn enable(nios: &NiosCore, dac: &Ad5621) -> Result<()> {
-    dac.disable(nios).await?;
-    let mut data = nios.read(Nios8x32::Control, 0).await?;
-    if data & PLL_ENABLE_BIT == 0 {
-        data |= PLL_ENABLE_BIT;
-        nios.write(Nios8x32::Control, 0, data).await?;
+/// Whether the PLL is driving the reference clock.
+pub async fn enabled(nios: &NiosCore) -> Result<bool> {
+    Ok(nios.read(Nios8x32::Control, 0).await? & PLL_ENABLE_BIT != 0)
+}
+
+/// Enable or disable the PLL.
+///
+/// The VCTCXO DAC and the PLL both drive the reference, so the DAC is
+/// released before the PLL is enabled and restored after it is disabled.
+pub async fn set_enabled(nios: &NiosCore, dac: &Ad5621, enable: bool) -> Result<()> {
+    if enable {
+        dac.disable(nios).await?;
+        write_enable_bit(nios, true).await
+    } else {
+        write_enable_bit(nios, false).await?;
+        dac.enable(nios).await
+    }
+}
+
+async fn write_enable_bit(nios: &NiosCore, enable: bool) -> Result<()> {
+    let data = nios.read(Nios8x32::Control, 0).await?;
+    let data = if enable {
+        data | PLL_ENABLE_BIT
+    } else {
+        data & !PLL_ENABLE_BIT
+    };
+    nios.write(Nios8x32::Control, 0, data).await
+}
+
+/// Program the reference frequency the PLL locks the VCTCXO to.
+///
+/// The PLL is enabled while the dividers are written and restored afterwards.
+pub async fn set_refclk(nios: &NiosCore, dac: &Ad5621, ref_hz: u64) -> Result<()> {
+    let (r, n) = calculate_pll_ratio(ref_hz, VCTCXO_HZ)?;
+
+    let was_enabled = enabled(nios).await?;
+    if !was_enabled {
+        set_enabled(nios, dac, true).await?;
+    }
+
+    // The latch index is the NIOS address: 0 = R, 1 = N, 2 = function.
+    for (address, data) in build_registers(r, n).into_iter().enumerate() {
+        nios.write(Nios8x32::Adf400x, address as u8, data).await?;
+    }
+
+    if !was_enabled {
+        set_enabled(nios, dac, false).await?;
     }
     Ok(())
 }
 
-/// Power down the PLL and re-enable the DAC.
-pub async fn disable(nios: &NiosCore, dac: &Ad5621) -> Result<()> {
-    let mut data = nios.read(Nios8x32::Control, 0).await?;
-    if data & PLL_ENABLE_BIT != 0 {
-        data &= !PLL_ENABLE_BIT;
-        nios.write(Nios8x32::Control, 0, data).await?;
+/// Reference frequency the PLL is programmed for, in Hz, from the R and N
+/// divider registers.
+pub async fn refclk(nios: &NiosCore) -> Result<u64> {
+    let r = u64::from((nios.read(Nios8x32::Adf400x, 0).await? >> 2) & 0x3FFF);
+    let n = u64::from((nios.read(Nios8x32::Adf400x, 1).await? >> 8) & 0x1FFF);
+    if n == 0 {
+        return Err(Error::PllDividerRatio);
     }
-    dac.enable(nios).await
-}
-
-/// Program the PLL reference divider for an external reference frequency.
-pub async fn configure_pll_reference(nios: &NiosCore, dac: &Ad5621, ref_freq: u64) -> Result<()> {
-    let (r, n) = calculate_pll_ratio(ref_freq, VCTCXO_HZ)?;
-
-    let enabled = nios.read(Nios8x32::Control, 0).await? & PLL_ENABLE_BIT != 0;
-    if !enabled {
-        enable(nios, dac).await?;
-    }
-
-    for data in build_registers(r, n) {
-        nios.write(Nios8x32::Adf400x, 0, data).await?;
-    }
-
-    if !enabled {
-        disable(nios, dac).await?;
-    }
-    Ok(())
+    Ok((r * VCTCXO_HZ + n / 2) / n)
 }
 
 /// Calculate the PLL R and N dividers by brute-force search, biased towards
 /// smaller dividers (first fit) for better PLL stability.
-fn calculate_pll_ratio(ref_freq: u64, clock_freq: u64) -> Result<(u16, u16)> {
+fn calculate_pll_ratio(ref_hz: u64, clock_hz: u64) -> Result<(u16, u16)> {
     const R_MAX: u16 = 16383;
     const N_MAX: u16 = 8191;
     const TOLERANCE: f64 = 0.00001;
 
-    if !(5_000_000..=300_000_000).contains(&ref_freq) {
+    if !REFCLK_RANGE.contains(&ref_hz) {
         return Err(Error::OutOfRange);
     }
-    if !(5_000_000..=400_000_000).contains(&clock_freq) {
+    if !(5_000_000..=400_000_000).contains(&clock_hz) {
         return Err(Error::OutOfRange);
     }
 
-    let target = clock_freq as f64 / ref_freq as f64;
+    let target = clock_hz as f64 / ref_hz as f64;
 
     for r in 1..=R_MAX {
         let n = (target * r as f64).round();

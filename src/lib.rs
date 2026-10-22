@@ -1,7 +1,7 @@
 //! Pure Rust driver for the [bladeRF 2.0 micro] software-defined radio.
 //!
 //! The driver talks to the radio directly over USB using [`nusb`], so it needs
-//! no `libbladeRF` or other native library, and it runs unchanged in the
+//! no vendor library or other native dependency, and it runs unchanged in the
 //! browser through WebUSB.
 //!
 //! # Blocking and async

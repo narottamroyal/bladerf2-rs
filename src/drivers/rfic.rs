@@ -1,6 +1,5 @@
 //! AD9361 RFIC control via the NIOS protocol (frequency, gain, sample rate,
-//! bandwidth, filters, channel enable). All logic ported from the original
-//! bladerf2 driver, which followed libbladeRF.
+//! bandwidth, filters, channel enable).
 
 use std::ops::RangeInclusive;
 use std::time::Duration;
@@ -210,7 +209,7 @@ pub async fn set_gain(nios: &NiosCore, channel: Channel, mut gain: f64) -> Resul
 ///
 /// The RFIC only applies a new RX gain while an RX channel is enabled; with
 /// every RX channel off, [`get_gain`] would keep returning the previous value
-/// until the next stream starts. Pulsing the channel on and off (about 2 ms)
+/// until the next stream starts. Briefly enabling and disabling an RX channel
 /// makes the firmware apply it.
 ///
 /// If an RX channel is already enabled the enable state is left alone, since
@@ -293,9 +292,9 @@ pub async fn get_sample_rate(nios: &NiosCore) -> Result<u64> {
 
 /// Set the sample rate in Hz.
 ///
-/// Replicates libbladeRF's transition sequencing: an intermediate safe rate
-/// when crossing between the low-rate and high-rate regimes, plus the
-/// RX 4x decimation / TX interpolation filter configuration.
+/// Crossing between the low-rate and high-rate regimes goes through an
+/// intermediate safe rate, and the RX 4x decimation / TX interpolation filters
+/// are configured to match.
 pub async fn set_sample_rate(nios: &NiosCore, sample_rate: u64) -> Result<()> {
     const LOW_RATE_THRESHOLD: u64 = 2_083_334;
     const HIGH_RATE_THRESHOLD: u64 = 40_000_000;
