@@ -160,10 +160,7 @@ impl RfLinkSession<'_> {
     }
 
     /// Current AGC mode for an RX channel.
-    pub fn gain_mode(
-        &self,
-        channel: Channel,
-    ) -> impl MaybeFuture<Output = Result<GainMode>> {
+    pub fn gain_mode(&self, channel: Channel) -> impl MaybeFuture<Output = Result<GainMode>> {
         maybe_future::operation(
             async move { drivers::rfic::get_gain_mode(self.nios, channel).await },
         )

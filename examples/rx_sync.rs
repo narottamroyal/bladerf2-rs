@@ -57,13 +57,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // ---- Supported ranges ---------------------------------------------------
     out!("\n== Supported ranges ==");
     let frequency = rf.frequency_range(Direction::Rx);
-    out!("frequency:     {:.1} - {:.1} MHz", mhz(*frequency.start()), mhz(*frequency.end()));
+    out!(
+        "frequency:     {:.1} - {:.1} MHz",
+        mhz(*frequency.start()),
+        mhz(*frequency.end())
+    );
     let sample_rate = rf.sample_rate_range();
-    out!("sample rate:   {:.3} - {:.3} MS/s", mhz(*sample_rate.start()), mhz(*sample_rate.end()));
+    out!(
+        "sample rate:   {:.3} - {:.3} MS/s",
+        mhz(*sample_rate.start()),
+        mhz(*sample_rate.end())
+    );
     let bandwidth = rf.bandwidth_range();
-    out!("bandwidth:     {:.3} - {:.3} MHz", mhz(*bandwidth.start()), mhz(*bandwidth.end()));
+    out!(
+        "bandwidth:     {:.3} - {:.3} MHz",
+        mhz(*bandwidth.start()),
+        mhz(*bandwidth.end())
+    );
     let gain = rf.gain_range(Direction::Rx).wait()?;
-    out!("gain:          {:.1} - {:.1} dB", gain.gain_range.start(), gain.gain_range.end());
+    out!(
+        "gain:          {:.1} - {:.1} dB",
+        gain.gain_range.start(),
+        gain.gain_range.end()
+    );
 
     // ---- Change settings and read them back ---------------------------------
     // Each line shows: value before -> value requested -> value read back.
@@ -72,22 +88,40 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let before = rf.frequency(Direction::Rx).wait()?;
     rf.set_frequency(Direction::Rx, FREQUENCY).wait()?;
     let after = rf.frequency(Direction::Rx).wait()?;
-    out!("frequency:     {:.3} -> {:.3} -> {:.3} MHz", mhz(before), mhz(FREQUENCY), mhz(after));
+    out!(
+        "frequency:     {:.3} -> {:.3} -> {:.3} MHz",
+        mhz(before),
+        mhz(FREQUENCY),
+        mhz(after)
+    );
 
     let before = rf.sample_rate().wait()?;
     rf.set_sample_rate(SAMPLE_RATE).wait()?;
     let after = rf.sample_rate().wait()?;
-    out!("sample rate:   {:.3} -> {:.3} -> {:.3} MS/s", mhz(before), mhz(SAMPLE_RATE), mhz(after));
+    out!(
+        "sample rate:   {:.3} -> {:.3} -> {:.3} MS/s",
+        mhz(before),
+        mhz(SAMPLE_RATE),
+        mhz(after)
+    );
 
     let before = rf.bandwidth(Direction::Rx).wait()?;
     rf.set_bandwidth(Direction::Rx, BANDWIDTH).wait()?;
     let after = rf.bandwidth(Direction::Rx).wait()?;
-    out!("bandwidth:     {:.3} -> {:.3} -> {:.3} MHz", mhz(before), mhz(BANDWIDTH), mhz(after));
+    out!(
+        "bandwidth:     {:.3} -> {:.3} -> {:.3} MHz",
+        mhz(before),
+        mhz(BANDWIDTH),
+        mhz(after)
+    );
 
     let before = rf.gain_mode(Channel::Rx0).wait()?;
     rf.set_gain_mode(Channel::Rx0, GainMode::Manual).wait()?;
     let after = rf.gain_mode(Channel::Rx0).wait()?;
-    out!("gain mode:     {before:?} -> {:?} -> {after:?}", GainMode::Manual);
+    out!(
+        "gain mode:     {before:?} -> {:?} -> {after:?}",
+        GainMode::Manual
+    );
 
     let before = rf.gain(Channel::Rx0).wait()?;
     rf.set_gain(Channel::Rx0, GAIN_DB).wait()?;
@@ -103,7 +137,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let n = rx.read(&mut [&mut samples], Some(TIMEOUT))?;
         let power = samples[..n].iter().map(|s| s.norm_sqr()).sum::<f32>() / n as f32;
         let peak = samples[..n].iter().map(|s| s.norm()).fold(0.0, f32::max);
-        out!("buffer {i}: {n} samples, mean power {:.1} dBFS, peak {peak:.3}", 10.0 * power.log10());
+        out!(
+            "buffer {i}: {n} samples, mean power {:.1} dBFS, peak {peak:.3}",
+            10.0 * power.log10()
+        );
     }
     // Always deactivate explicitly; dropping an active stream is best-effort only.
     rx.deactivate().wait()?;
