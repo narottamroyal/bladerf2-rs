@@ -326,8 +326,19 @@ pub async fn set_sample_rate(nios: &NiosCore, sample_rate: u64) -> Result<()> {
         (FilterMode::Ratio1, FilterMode::Bypass)
     };
 
-    set_filter(nios, Direction::Rx, rx_mode).await?;
-    set_filter(nios, Direction::Tx, tx_mode).await?;
+    let filters = async {
+        set_filter(nios, Direction::Rx, rx_mode).await?;
+        set_filter(nios, Direction::Tx, tx_mode).await
+    }
+    .await;
+
+    // A failed filter write can leave one direction in 4x mode and the other
+    // not. Put both back to their defaults before reporting the error.
+    if let Err(error) = filters {
+        set_filter(nios, Direction::Rx, FilterMode::Ratio1).await?;
+        set_filter(nios, Direction::Tx, FilterMode::Bypass).await?;
+        return Err(error);
+    }
 
     write(nios, Channel::Rx0, Command::SampleRate, sample_rate).await
 }
