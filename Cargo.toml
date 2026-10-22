@@ -31,6 +31,7 @@ tracing = "0.1"
 wasm-bindgen-futures = "0.4"
 
 [dev-dependencies]
+approx = { version = "0.5", features = ["num-complex"] }
 serial_test = "3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]

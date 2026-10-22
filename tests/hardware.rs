@@ -13,14 +13,37 @@
 
 #![cfg(all(feature = "hardware-tests", not(target_arch = "wasm32")))]
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use approx::abs_diff_eq;
 use bladerf2::{BladeRf2, Channel, Direction, GainMode, MaybeFuture, Version};
 use num_complex::Complex32;
 use serial_test::serial;
 
 /// Generous per-read timeout, so a dead stream fails the test rather than hanging it.
 const TIMEOUT: Option<Duration> = Some(Duration::from_secs(3));
+
+/// Allowed error on each component of a looped-back sample: 2^-12.
+const LOOPBACK_EPSILON: f32 = 1.0 / 4096.0;
+
+/// Asserts that each received sample matches the sample sent.
+fn assert_loopback(sent: &[Complex32], received: &[Complex32]) {
+    assert_eq!(sent.len(), received.len());
+    for (i, (a, b)) in sent.iter().zip(received).enumerate() {
+        assert!(
+            abs_diff_eq!(*a, *b, epsilon = LOOPBACK_EPSILON),
+            "sample {i}: sent {a}, received {b}"
+        );
+    }
+}
+
+/// Encodes a sample index exactly: the low 10 bits in I, the rest in Q.
+fn encode(index: usize) -> Complex32 {
+    Complex32::new(
+        (index % 1024) as f32 / 2048.0,
+        (index / 1024) as f32 / 2048.0,
+    )
+}
 
 /// Turns loopback off when dropped, so a failing test cannot leave it on for the next one.
 struct Loopback<'r, 'd>(&'r bladerf2::RfLinkSession<'d>);
@@ -99,17 +122,27 @@ fn frequency() {
 
     rf.set_frequency(Direction::Rx, FREQ1).wait().unwrap();
     rf.set_frequency(Direction::Tx, FREQ2).wait().unwrap();
-    let rx = rf.frequency(Direction::Rx).wait().unwrap();
-    let tx = rf.frequency(Direction::Tx).wait().unwrap();
-    assert!((rx as f64 - FREQ1 as f64).abs() < 5.0);
-    assert!((tx as f64 - FREQ2 as f64).abs() < 5.0);
+    assert!(rf.frequency(Direction::Rx).wait().unwrap().abs_diff(FREQ1) <= 5);
+    assert!(rf.frequency(Direction::Tx).wait().unwrap().abs_diff(FREQ2) <= 5);
 
     rf.set_frequency(Direction::Rx, FREQ2).wait().unwrap();
     rf.set_frequency(Direction::Tx, FREQ1).wait().unwrap();
-    let rx = rf.frequency(Direction::Rx).wait().unwrap();
-    let tx = rf.frequency(Direction::Tx).wait().unwrap();
-    assert!((rx as f64 - FREQ2 as f64).abs() < 5.0);
-    assert!((tx as f64 - FREQ1 as f64).abs() < 5.0);
+    assert!(rf.frequency(Direction::Rx).wait().unwrap().abs_diff(FREQ2) <= 5);
+    assert!(rf.frequency(Direction::Tx).wait().unwrap().abs_diff(FREQ1) <= 5);
+
+    // Just outside each end of each range: rejected, and the previous
+    // frequency is kept. The lower check is skipped when the range starts at 0.
+    for direction in [Direction::Rx, Direction::Tx] {
+        let range = rf.frequency_range(direction);
+        let current = rf.frequency(direction).wait().unwrap();
+        assert!(
+            rf.set_frequency(direction, range.start() - 1)
+                .wait()
+                .is_err()
+        );
+        assert!(rf.set_frequency(direction, range.end() + 1).wait().is_err());
+        assert!(rf.frequency(direction).wait().unwrap().abs_diff(current) <= 5);
+    }
 }
 
 #[test]
@@ -204,18 +237,89 @@ fn gain_mode() {
 fn sample_rate() {
     let mut dev = open();
     let rf = dev.rf_link_session();
+    let range = rf.sample_rate_range();
 
-    // Includes the switches between high and low sample rates that once
-    // misbehaved.
-    for rate in [25_000_000, 50_000_000, 2_083_334, 40_000_001, 2_083_332] {
+    // Both ends of the range, and values either side of the low/high rate
+    // switches (about 2.08 and 40 MS/s).
+    for rate in [
+        *range.start(),
+        2_083_332,
+        2_083_334,
+        2_500_000,
+        25_000_000,
+        40_000_000,
+        40_000_001,
+        50_000_000,
+        *range.end(),
+    ] {
         rf.set_sample_rate(rate).wait().unwrap();
-        assert_eq!(rf.sample_rate().wait().unwrap(), rate);
+        let actual = rf.sample_rate().wait().unwrap();
+        assert!(
+            actual.abs_diff(rate) <= 1,
+            "requested {rate} Hz, got {actual} Hz"
+        );
+    }
+
+    // Out of range: rejected, and the previous rate is kept.
+    rf.set_sample_rate(10_000_000).wait().unwrap();
+    assert!(rf.set_sample_rate(range.start() - 1).wait().is_err());
+    assert!(rf.set_sample_rate(range.end() + 1).wait().is_err());
+    assert_eq!(rf.sample_rate().wait().unwrap(), 10_000_000);
+
+    // Setting the current rate during a stream must not disturb it.
+    let mut rx = rf.rx_stream(&[0]).unwrap();
+    rx.activate().wait().unwrap();
+    let mut buf = vec![Complex32::ZERO; rx.mtu()];
+    assert_eq!(
+        rx.read(&mut [buf.as_mut_slice()], TIMEOUT).unwrap(),
+        buf.len()
+    );
+
+    rf.set_sample_rate(10_000_000).wait().unwrap();
+    assert_eq!(
+        rx.read(&mut [buf.as_mut_slice()], TIMEOUT).unwrap(),
+        buf.len()
+    );
+    assert_eq!(rf.sample_rate().wait().unwrap(), 10_000_000);
+
+    rx.deactivate().wait().unwrap();
+}
+
+#[test]
+#[serial]
+fn receive_throughput() {
+    // Measures sustained receive rate over two seconds at each rate. A rate
+    // within 5% of the target passes.
+    let mut dev = open();
+    let rf = dev.rf_link_session();
+
+    for rate in [2_000_000, 10_000_000, 30_720_000] {
+        rf.set_sample_rate(rate).wait().unwrap();
+
+        let mut rx = rf.rx_stream(&[0]).unwrap();
+        rx.activate().wait().unwrap();
+        let mut buf = vec![Complex32::ZERO; rx.mtu()];
+
+        let start = Instant::now();
+        let mut total = 0usize;
+        while start.elapsed() < Duration::from_secs(2) {
+            total += rx.read(&mut [buf.as_mut_slice()], TIMEOUT).unwrap();
+        }
+        let measured = total as f64 / start.elapsed().as_secs_f64();
+        rx.deactivate().wait().unwrap();
+
+        assert!(
+            measured >= 0.95 * rate as f64,
+            "{rate} S/s: measured {measured:.0} S/s"
+        );
     }
 }
 
 #[test]
 #[serial]
 fn siso_loopback() {
+    // Each block carries sample indices. Every sample must come back exactly
+    // as sent, which checks both the values and their order across many blocks.
     let mut dev = open();
     let rf = dev.rf_link_session();
     rf.set_gain(Channel::Rx0, 0.0).wait().unwrap();
@@ -230,25 +334,12 @@ fn siso_loopback() {
     rx.activate().wait().unwrap();
 
     let n = rx.mtu();
-    let mut tx_data = vec![Complex32::ZERO; n];
     let mut rx_data = vec![Complex32::ZERO; n];
-
-    for pow in 1..16 {
-        // Complex sinusoids at a range of frequencies.
-        for (i, sample) in tx_data.iter_mut().enumerate() {
-            let phase = 2.0 * std::f32::consts::PI * (i as f32) / 2.0_f32.powi(pow);
-            *sample = (Complex32::I * phase).exp() * 0.5;
-        }
-
-        tx.write(&[tx_data.as_slice()], TIMEOUT).unwrap();
-        rx.read(&mut [rx_data.as_mut_slice()], TIMEOUT).unwrap();
-
-        const MAX_ERROR: f32 = 1.0 / 4096.0; // 2^-12
-        for (a, b) in tx_data.iter().zip(rx_data.iter()) {
-            let delta = a - b;
-            assert!(delta.re.abs() <= MAX_ERROR, "pow {pow}: {delta}");
-            assert!(delta.im.abs() <= MAX_ERROR, "pow {pow}: {delta}");
-        }
+    for block in 0..16 {
+        let tx_data: Vec<_> = (0..n).map(|i| encode(block * n + i)).collect();
+        assert_eq!(tx.write(&[tx_data.as_slice()], TIMEOUT).unwrap(), n);
+        assert_eq!(rx.read(&mut [rx_data.as_mut_slice()], TIMEOUT).unwrap(), n);
+        assert_loopback(&tx_data, &rx_data);
     }
 
     rx.deactivate().wait().unwrap();
@@ -289,22 +380,18 @@ fn mimo_loopback() {
             tx1[i] = (Complex32::I * phase).exp() * -0.25;
         }
 
-        tx.write(&[tx0.as_slice(), tx1.as_slice()], TIMEOUT)
-            .unwrap();
-        rx.read(&mut [rx0.as_mut_slice(), rx1.as_mut_slice()], TIMEOUT)
-            .unwrap();
-
-        const MAX_ERROR: f32 = 1.0 / 4096.0; // 2^-12
-        for (a, b) in tx0.iter().zip(rx0.iter()) {
-            let delta = a - b;
-            assert!(delta.re.abs() <= MAX_ERROR, "ch0 pow {pow}: {delta}");
-            assert!(delta.im.abs() <= MAX_ERROR, "ch0 pow {pow}: {delta}");
-        }
-        for (a, b) in tx1.iter().zip(rx1.iter()) {
-            let delta = a - b;
-            assert!(delta.re.abs() <= MAX_ERROR, "ch1 pow {pow}: {delta}");
-            assert!(delta.im.abs() <= MAX_ERROR, "ch1 pow {pow}: {delta}");
-        }
+        assert_eq!(
+            tx.write(&[tx0.as_slice(), tx1.as_slice()], TIMEOUT)
+                .unwrap(),
+            n
+        );
+        assert_eq!(
+            rx.read(&mut [rx0.as_mut_slice(), rx1.as_mut_slice()], TIMEOUT)
+                .unwrap(),
+            n
+        );
+        assert_loopback(&tx0, &rx0);
+        assert_loopback(&tx1, &rx1);
     }
 
     rx.deactivate().wait().unwrap();
