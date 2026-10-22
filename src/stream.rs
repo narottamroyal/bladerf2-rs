@@ -183,21 +183,37 @@ impl RxStream {
         })
     }
 
-    /// Deactivate the stream, draining pending transfers first.
+    /// Deactivate the stream and discard samples that were received but not
+    /// yet read.
     pub fn deactivate(&mut self) -> impl MaybeFuture<Output = Result<()>> + '_ {
         maybe_future::operation(async move {
-            // Drain any pending input transfers so the endpoint queue is clean on drop
-            while self.endpoint.pending() > 0 {
-                let _ = usb::next_in(&mut self.endpoint).await;
-            }
-            set_path_enabled(
+            // Stop the radio first. Transfers still queued only complete when
+            // data arrives, and none will once the stream has stopped (for
+            // example in loopback with an idle TX), so waiting for them
+            // before this point could block forever.
+            let result = set_path_enabled(
                 &self.nios,
                 &self.transport,
                 &self.channels,
                 Direction::Rx,
                 false,
             )
-            .await
+            .await;
+
+            // Native: cancel the queued transfers and collect them so the
+            // endpoint is clean. WebUSB cannot cancel transfers, so they are
+            // left queued; they complete with fresh data after the next
+            // `activate`.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.endpoint.cancel_all();
+                while self.endpoint.pending() > 0 {
+                    let _ = usb::next_in(&mut self.endpoint).await;
+                }
+            }
+
+            self.pending.clear();
+            result
         })
     }
 

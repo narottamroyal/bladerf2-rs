@@ -149,8 +149,8 @@ impl RfLinkSession<'_> {
     ///
     /// Setting an RX gain switches the channel to [`GainMode::Manual`]. The
     /// new gain is applied immediately, so [`gain`](Self::gain) reads it back
-    /// right away. If no RX channel is running this briefly (about 2 ms)
-    /// enables and disables the RX path to make the radio apply it; a running
+    /// right away. If no RX channel is running, this briefly enables and then
+    /// disables an RX channel to make the radio apply it; a running
     /// RX stream is never toggled, so setting the gain of the *other* RX
     /// channel while one is streaming only takes effect once it starts.
     pub fn set_gain(&self, channel: Channel, gain: f64) -> impl MaybeFuture<Output = Result<()>> {
@@ -182,17 +182,20 @@ impl RfLinkSession<'_> {
 
     // ==================== Bias tee ====================
 
-    /// Enable the bias tee for a direction (DC power on the antenna port).
-    pub fn enable_bias_tee(&self, direction: Direction) -> impl MaybeFuture<Output = Result<()>> {
-        maybe_future::operation(async move {
-            drivers::rffe::enable_bias_tee(self.nios, direction).await
-        })
+    /// Whether the bias tee is supplying DC power on a direction's antenna port.
+    pub fn bias_tee(&self, direction: Direction) -> impl MaybeFuture<Output = Result<bool>> {
+        maybe_future::operation(async move { drivers::rffe::bias_tee(self.nios, direction).await })
     }
 
-    /// Disable the bias tee for a direction.
-    pub fn disable_bias_tee(&self, direction: Direction) -> impl MaybeFuture<Output = Result<()>> {
+    /// Turn the bias tee on or off for a direction. While on, it supplies DC
+    /// power on that direction's antenna port.
+    pub fn set_bias_tee(
+        &self,
+        direction: Direction,
+        enable: bool,
+    ) -> impl MaybeFuture<Output = Result<()>> {
         maybe_future::operation(async move {
-            drivers::rffe::disable_bias_tee(self.nios, direction).await
+            drivers::rffe::set_bias_tee(self.nios, direction, enable).await
         })
     }
 
@@ -224,26 +227,56 @@ impl RfLinkSession<'_> {
 
     // ==================== PLL ====================
 
-    /// Program the PLL reference for an external reference frequency.
-    pub fn set_pll_reference(&self, ref_freq: u64) -> impl MaybeFuture<Output = Result<()>> {
+    /// Supported PLL reference frequency range, in Hz.
+    pub fn pll_refclk_range(&self) -> RangeInclusive<u64> {
+        drivers::adf4002::REFCLK_RANGE
+    }
+
+    /// PLL reference frequency, in Hz.
+    ///
+    /// Computed from the PLL divider registers. The dividers are integers, so
+    /// this can differ slightly from the value given to
+    /// [`set_pll_refclk`](Self::set_pll_refclk).
+    pub fn pll_refclk(&self) -> impl MaybeFuture<Output = Result<u64>> {
+        maybe_future::operation(async move { drivers::adf4002::refclk(self.nios).await })
+    }
+
+    /// Set the PLL reference frequency, in Hz.
+    ///
+    /// Fails with [`Error::OutOfRange`](crate::Error::OutOfRange) outside
+    /// [`pll_refclk_range`](Self::pll_refclk_range).
+    pub fn set_pll_refclk(&self, ref_hz: u64) -> impl MaybeFuture<Output = Result<()>> {
         maybe_future::operation(async move {
-            drivers::adf4002::configure_pll_reference(self.nios, self.dac, ref_freq).await
+            drivers::adf4002::set_refclk(self.nios, self.dac, ref_hz).await
         })
     }
 
-    /// Enable the external PLL reference (disables the VCTCXO DAC output).
-    pub fn enable_pll(&self) -> impl MaybeFuture<Output = Result<()>> {
-        maybe_future::operation(async move { drivers::adf4002::enable(self.nios, self.dac).await })
+    /// Whether the PLL is locking the on-board VCTCXO to the reference on
+    /// REFIN (J95).
+    pub fn pll_enable(&self) -> impl MaybeFuture<Output = Result<bool>> {
+        maybe_future::operation(async move { drivers::adf4002::enabled(self.nios).await })
     }
 
-    /// Disable the external PLL reference (re-enables the VCTCXO DAC output).
-    pub fn disable_pll(&self) -> impl MaybeFuture<Output = Result<()>> {
-        maybe_future::operation(async move { drivers::adf4002::disable(self.nios, self.dac).await })
+    /// Turn the PLL on or off. While on, it locks the on-board VCTCXO to the
+    /// reference on REFIN (J95) and the VCTCXO DAC is released; turning it off
+    /// restores the DAC.
+    pub fn set_pll_enable(&self, enable: bool) -> impl MaybeFuture<Output = Result<()>> {
+        maybe_future::operation(async move {
+            drivers::adf4002::set_enabled(self.nios, self.dac, enable).await
+        })
+    }
+
+    /// Whether the PLL reports lock to the reference on REFIN.
+    pub fn pll_lock_state(&self) -> impl MaybeFuture<Output = Result<bool>> {
+        maybe_future::operation(async move { drivers::rffe::pll_lock_state(self.nios).await })
     }
 
     // ==================== Diagnostics ====================
 
-    /// Current 64-bit FPGA timestamp.
+    /// Current 64-bit FPGA timestamp counter.
+    ///
+    /// In testing this has read 0 even while streaming, so it is not yet
+    /// known to be a usable clock with this driver.
     pub fn timestamp(&self) -> impl MaybeFuture<Output = Result<u64>> {
         maybe_future::operation(async move { self.nios.read(Nios8x64::Timestamp, 0).await })
     }
