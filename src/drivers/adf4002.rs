@@ -84,7 +84,7 @@ pub async fn refclk(nios: &NiosCore) -> Result<u64> {
     if n == 0 {
         return Err(Error::PllDividerRatio);
     }
-    Ok((r * VCTCXO_HZ + n / 2) / n)
+    Ok(r * VCTCXO_HZ / n)
 }
 
 /// Calculate the PLL R and N dividers by brute-force search, biased towards
