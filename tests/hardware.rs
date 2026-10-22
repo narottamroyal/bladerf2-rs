@@ -289,7 +289,8 @@ fn mimo_loopback() {
             tx1[i] = (Complex32::I * phase).exp() * -0.25;
         }
 
-        tx.write(&[tx0.as_slice(), tx1.as_slice()], TIMEOUT).unwrap();
+        tx.write(&[tx0.as_slice(), tx1.as_slice()], TIMEOUT)
+            .unwrap();
         rx.read(&mut [rx0.as_mut_slice(), rx1.as_mut_slice()], TIMEOUT)
             .unwrap();
 
