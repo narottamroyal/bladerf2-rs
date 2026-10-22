@@ -14,6 +14,8 @@ default = []
 # runtime. The blocking `.wait()` API needs neither, and neither does wasm.
 smol = ["nusb/smol"]
 tokio = ["nusb/tokio"]
+# Hardware tests in tests/hardware.rs require a bladeRF 2.0 micro.
+hardware-tests = []
 
 [dependencies]
 bytemuck = "1"

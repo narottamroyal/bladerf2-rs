@@ -4,7 +4,7 @@ A pure Rust driver for the [bladeRF 2.0 micro](https://www.nuand.com/bladerf-2-0
 software-defined radio.
 
 The driver talks to the radio directly over USB with [`nusb`](https://crates.io/crates/nusb).
-There is no `libbladeRF` or other native library to install, and the same code
+There is no vendor library or other native dependency to install, and the same code
 runs in the browser through WebUSB.
 
 - **Blocking or async.** Every device operation returns a `MaybeFuture`: call
@@ -69,8 +69,7 @@ return the granted devices. The `rx_web` example shows the complete flow.
 ## Examples
 
 `rx_sync`, `rx_async` and `rx_web` are deliberately near-identical. Each one
-prints the serial number, FPGA version, VCTCXO trim, timestamp and loopback
-state; lists the supported frequency, sample rate, bandwidth and gain ranges;
+prints the serial number, FPGA version, VCTCXO trim and loopback state; lists the supported frequency, sample rate, bandwidth and gain ranges;
 changes each setting and reads it back; and receives a few buffers of samples.
 
 | Example | Run with |
@@ -84,8 +83,8 @@ changes each setting and reads it back; and receives a few buffers of samples.
 - **Sample rate at power-up.** The radio boots at 30.72 Msps. Set a rate you can
   sustain before streaming.
 - **Setting RX gain.** The radio only applies a new RX gain while an RX channel
-  is enabled. When none is running, `set_gain()` briefly (about 2 ms) enables and
-  disables the RX path so that `gain()` reads the new value straight back.
+  is enabled. When no RX channels are active, `set_gain()` briefly enables and then
+  disables an RX channel, so that `gain()` reads the new value straight back.
 - **Always `deactivate` streams.** Dropping an active stream deactivates it on a
   best-effort basis only (asynchronously on wasm), so deactivate explicitly.
 - **USB 3.0.** Streaming needs a SuperSpeed connection. Where the platform
@@ -99,6 +98,22 @@ changes each setting and reads it back; and receives a few buffers of samples.
   in `/etc/udev/rules.d/`, or install Nuand's rules. The same permission is
   needed for WebUSB in the browser.
 - **Windows:** the device needs a WinUSB-compatible driver (for example via Zadig).
+
+## Testing
+
+Unit tests need no hardware:
+
+```console
+$ cargo test
+```
+
+Hardware tests need a bladeRF 2.0 micro attached, so they are only built with
+the `hardware-tests` feature:
+
+```console
+$ cargo test --features hardware-tests
+$ BLADERF2_SERIAL=c504 cargo test --features hardware-tests  # pick a device
+```
 
 ## Status
 
