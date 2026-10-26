@@ -52,7 +52,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // All configuration goes through the session. It borrows the device mutably,
     // so only one can exist at a time.
     let rf = dev.rf_link_session();
-    out!("loopback:      {}", rf.loopback().wait()?);
+    out!("rx source:     {:?}", rf.rx_source().wait()?);
 
     // ---- Supported ranges ---------------------------------------------------
     out!("\n== Supported ranges ==");

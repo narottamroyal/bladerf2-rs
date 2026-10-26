@@ -22,6 +22,7 @@ use nusb::MaybeFuture;
 
 use crate::channel::{Channel, Direction};
 use crate::drivers;
+use crate::drivers::fpga::RxSource;
 use crate::drivers::rfic::{GainMode, GainRange};
 use crate::error::Result;
 use crate::maybe_future;
@@ -32,7 +33,8 @@ use crate::usb::UsbTransport;
 /// Exclusive handle for configuring the radio and creating sample streams.
 ///
 /// Provides frequency, gain, sample rate and bandwidth control, bias tee,
-/// loopback, PLL reference selection, a few diagnostics, and RX/TX streams.
+/// RX source (including loopback), PLL reference selection, a few diagnostics,
+/// and RX/TX streams.
 /// Obtain one from [`BladeRf2::rf_link_session`](crate::BladeRf2::rf_link_session).
 ///
 /// Methods returning a [`MaybeFuture`] can be run with `.wait()` (blocking,
@@ -196,19 +198,17 @@ impl RfLinkSession<'_> {
         })
     }
 
-    // ==================== Loopback ====================
+    // ==================== RX source ====================
 
-    /// Whether FPGA RF loopback is enabled.
-    pub fn loopback(&self) -> impl MaybeFuture<Output = Result<bool>> {
-        maybe_future::operation(drivers::fpga::loopback(self.nios))
+    /// Where RX samples come from.
+    pub fn rx_source(&self) -> impl MaybeFuture<Output = Result<RxSource>> {
+        maybe_future::operation(drivers::fpga::rx_source(self.nios))
     }
 
-    /// Enable or disable FPGA RF loopback.
-    pub fn set_loopback(&self, enable: bool) -> impl MaybeFuture<Output = Result<()>> {
-        maybe_future::operation(async move {
-            drivers::fpga::set_loopback(self.nios, enable).await?;
-            Ok(())
-        })
+    /// Take RX samples from `source`: the RFIC, a test counter, or TX samples
+    /// looped back inside the FPGA.
+    pub fn set_rx_source(&self, source: RxSource) -> impl MaybeFuture<Output = Result<()>> {
+        maybe_future::operation(drivers::fpga::set_rx_source(self.nios, source))
     }
 
     // ==================== PLL ====================

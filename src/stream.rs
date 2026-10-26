@@ -191,9 +191,15 @@ impl<D: EndpointDirection> Path<D> {
         if self.direction == Direction::Rx {
             // In loopback, RX data only arrives while TX sends, so read from
             // the RFIC until the queue drains. Loopback stops with RX anyway.
-            let looped = crate::drivers::fpga::set_loopback(&self.nios, false).await?;
+            use crate::drivers::fpga::{self, RxSource};
+            let looped = fpga::rx_source(&self.nios).await? == RxSource::Loopback;
+            if looped {
+                fpga::set_rx_source(&self.nios, RxSource::Rfic).await?;
+            }
             let drained = drain(&mut self.endpoint).await;
-            crate::drivers::fpga::set_loopback(&self.nios, looped).await?;
+            if looped {
+                fpga::set_rx_source(&self.nios, RxSource::Loopback).await?;
+            }
             drained?;
         } else {
             drain(&mut self.endpoint).await?;

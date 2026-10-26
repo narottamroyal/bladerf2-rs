@@ -69,7 +69,7 @@ return the granted devices. The `rx_web` example shows the complete flow.
 ## Examples
 
 `rx_sync`, `rx_async` and `rx_web` are deliberately near-identical. Each one
-prints the serial number, FPGA version, VCTCXO trim and loopback state; lists the supported frequency, sample rate, bandwidth and gain ranges;
+prints the serial number, FPGA version, VCTCXO trim and RX source; lists the supported frequency, sample rate, bandwidth and gain ranges;
 changes each setting and reads it back; and receives a few buffers of samples.
 
 | Example | Run with |
