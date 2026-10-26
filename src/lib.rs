@@ -96,6 +96,9 @@ mod usb;
 pub use channel::{Channel, Direction};
 pub use drivers::rfic::{GainMode, GainRange};
 pub use error::{Error, Result};
+#[cfg(all(feature = "hardware-tests", not(target_arch = "wasm32")))]
+#[doc(hidden)]
+pub use maybe_future::block_on;
 pub use nusb::{DeviceInfo, MaybeFuture};
 pub use session::RfLinkSession;
 pub use stream::{RxStream, TxStream};

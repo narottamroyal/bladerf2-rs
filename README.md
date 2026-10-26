@@ -104,17 +104,76 @@ changes each setting and reads it back; and receives a few buffers of samples.
 
 Unit tests need no hardware:
 
-```console
-$ cargo test
+```sh
+cargo test
 ```
 
-Hardware tests need a bladeRF 2.0 micro attached, so they are only built with
-the `hardware-tests` feature:
+Hardware tests need a bladeRF 2.0 micro attached and the `hardware-tests`
+feature. They share the device, so run them one at a time. Each test runs in up
+to three modes, from one source:
 
-```console
-$ cargo test --features hardware-tests
-$ BLADERF2_SERIAL=c504 cargo test --features hardware-tests  # pick a device
+- **blocking** (native): the blocking path that `.wait()` uses.
+- **asynchronous** (native, needs the `smol` feature): real async USB.
+- **browser** (wasm): see [Browser tests](#browser-tests).
+
+Blocking:
+
+```sh
+cargo test --features hardware-tests -- --test-threads=1
 ```
+
+Async:
+
+```sh
+cargo test --features hardware-tests,smol -- --test-threads=1 asynchronous
+```
+
+Both:
+
+```sh
+cargo test --features hardware-tests,smol -- --test-threads=1
+```
+
+To choose a device when several are attached, set `BLADERF2_SERIAL` to a
+serial-number prefix:
+
+```sh
+BLADERF2_SERIAL=c504 cargo test --features hardware-tests -- --test-threads=1
+```
+
+### Browser tests
+
+WebUSB only exists in a browser, so these run in headless Chromium (Node.js has
+no `navigator.usb`). They need `chromium` and `chromedriver` (Linux only);
+`chromedriver` must be on `PATH`, or set `CHROMEDRIVER`.
+
+Allow the device for the test origin without a prompt, once, by installing a
+Chromium managed policy:
+
+```sh
+sudo scripts/browser-policy.sh install
+```
+
+Run the tests (they take turns on the device):
+
+```sh
+cargo test --target wasm32-unknown-unknown --features hardware-tests --test hardware
+```
+
+Remove the policy:
+
+```sh
+sudo scripts/browser-policy.sh remove
+```
+
+Notes:
+
+- The policy applies to every Chromium profile, but only for the bladeRF 2.0
+  micro on `http://127.0.0.1:8123`, the test server's address
+  (`.cargo/config.toml`). Port 8123 must be free while the tests run.
+- A test that panics aborts the wasm module, so the tests after it time out.
+- Only Chromium on Linux is covered. Chrome, macOS and Windows use different
+  policy locations.
 
 ## Status
 
