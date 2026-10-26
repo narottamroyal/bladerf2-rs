@@ -23,9 +23,9 @@ use std::time::Duration;
 /// trip through the browser, so the browser needs larger ones to keep up at
 /// high sample rates.
 #[cfg(not(target_arch = "wasm32"))]
-const TRANSFER_SIZE: usize = 8 * 1024;
+const TRANSFER_SIZE: usize = 16 * 1024;
 #[cfg(not(target_arch = "wasm32"))]
-const MAX_PENDING: usize = 4;
+const MAX_PENDING: usize = 16;
 #[cfg(target_arch = "wasm32")]
 const TRANSFER_SIZE: usize = 128 * 1024;
 #[cfg(target_arch = "wasm32")]
