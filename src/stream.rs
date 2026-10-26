@@ -111,9 +111,7 @@ pub(crate) async fn disable_all(nios: &NiosCore, transport: &UsbTransport) -> Re
 async fn drain<D: EndpointDirection>(endpoint: &mut nusb::Endpoint<Bulk, D>) -> Result<()> {
     while endpoint.pending() > 0 {
         let completion = with_timeout(
-            async {
-                Ok::<_, Error>(std::future::poll_fn(|cx| endpoint.poll_next_complete(cx)).await)
-            },
+            async { Ok(usb::next_complete(endpoint).await) },
             Some(COLLECT_TIMEOUT),
         )
         .await?;
@@ -324,8 +322,9 @@ impl RxStream {
             while self.path.endpoint.pending() < MAX_PENDING {
                 self.path.endpoint.submit(Buffer::new(TRANSFER_SIZE));
             }
-            let transfer = usb::next_in(&mut self.path.endpoint).await?;
-            self.received.push_back(transfer);
+            let transfer = usb::next_complete(&mut self.path.endpoint).await;
+            transfer.status?;
+            self.received.push_back(transfer.buffer);
         }
         Ok(())
     }
@@ -444,7 +443,7 @@ impl TxStream {
             k += count;
 
             while self.path.endpoint.pending() >= MAX_PENDING {
-                usb::next_out(&mut self.path.endpoint).await?;
+                usb::next_complete(&mut self.path.endpoint).await.status?;
             }
         }
         Ok(())

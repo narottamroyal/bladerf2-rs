@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use nusb::{
     Interface,
-    transfer::{Bulk, In, Out},
+    transfer::{Buffer, Bulk, In, Out},
 };
 
 use crate::error::{Error, Result};
@@ -191,29 +191,31 @@ impl Io {
     ) -> Result<Packet::Data> {
         let packet = target.encode(address, data, write);
 
-        if self.input.pending() == 0 {
-            self.input.submit(nusb::transfer::Buffer::new(self.in_size));
-        }
-
-        self.out.submit(packet.to_vec().into());
-
         let response = with_timeout(
             async {
-                usb::next_out(&mut self.out).await?;
-                usb::next_in(&mut self.input).await
+                // An exchange that timed out or was dropped part-way leaves its
+                // request or response queued. Finish it first, so that its
+                // response is not taken for this one's.
+                while self.out.pending() > 0 {
+                    usb::next_complete(&mut self.out).await;
+                }
+                while self.input.pending() > 0 {
+                    usb::next_complete(&mut self.input).await;
+                }
+
+                self.input.submit(Buffer::new(self.in_size));
+                self.out.submit(packet.to_vec().into());
+                usb::next_complete(&mut self.out).await.status?;
+                let response = usb::next_complete(&mut self.input).await;
+                response.status?;
+                Ok(response.buffer)
             },
             Some(TRANSFER_TIMEOUT),
         )
         .await
         .inspect_err(|e| tracing::error!(target: "bladerf2::nios", "nios: request failed: {e}"))?;
 
-        let response_bytes: &[u8; PACKET_SIZE] = response
-            .get(..PACKET_SIZE)
-            .ok_or(Error::ValueConversion)?
-            .try_into()
-            .map_err(|_| Error::ValueConversion)?;
-
-        target.decode(response_bytes)
+        target.decode(response.first_chunk().ok_or(Error::ValueConversion)?)
     }
 }
 

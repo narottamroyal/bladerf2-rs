@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use nusb::{
     Interface,
-    transfer::{Bulk, ControlIn, ControlType, In, Out, Recipient},
+    transfer::{Bulk, Completion, ControlIn, ControlType, EndpointDirection, Recipient},
 };
 
 use crate::error::{Error, Result};
@@ -208,20 +208,11 @@ pub(crate) fn aligned_size(size: usize, packet_size: usize) -> usize {
     size.div_ceil(packet_size).max(1) * packet_size
 }
 
-/// Await the next completion on a bulk IN endpoint and return the received
-/// bytes. Runtime-independent: nusb wakes the task from its own completion
-/// threads on native targets and from WebUSB events on wasm.
-pub(crate) async fn next_in(
-    endpoint: &mut nusb::Endpoint<Bulk, In>,
-) -> Result<nusb::transfer::Buffer> {
-    let completion = std::future::poll_fn(|cx| endpoint.poll_next_complete(cx)).await;
-    completion.status?;
-    Ok(completion.buffer)
-}
-
-/// Await the next completion on a bulk OUT endpoint, freeing an in-flight slot.
-pub(crate) async fn next_out(endpoint: &mut nusb::Endpoint<Bulk, Out>) -> Result<()> {
-    let completion = std::future::poll_fn(|cx| endpoint.poll_next_complete(cx)).await;
-    completion.status?;
-    Ok(())
+/// Wait for the oldest queued transfer on a bulk endpoint to complete.
+/// Runtime-independent: nusb wakes the task from its own completion threads
+/// on native targets and from WebUSB events on wasm.
+pub(crate) async fn next_complete<D: EndpointDirection>(
+    endpoint: &mut nusb::Endpoint<Bulk, D>,
+) -> Completion {
+    std::future::poll_fn(|cx| endpoint.poll_next_complete(cx)).await
 }
