@@ -37,13 +37,17 @@ fn bias_tee_bit(direction: Direction) -> u32 {
 }
 
 /// Whether the bias tee is supplying DC on a direction's antenna port.
-pub async fn bias_tee(nios: &NiosCore, direction: Direction) -> Result<bool> {
+pub(crate) async fn bias_tee(nios: &NiosCore, direction: Direction) -> Result<bool> {
     let reg = nios.read(Nios8x32::RfFrontend, 0).await?;
     Ok(reg & (1 << bias_tee_bit(direction)) != 0)
 }
 
 /// Turn the bias tee on or off for a direction.
-pub async fn set_bias_tee(nios: &NiosCore, direction: Direction, enable: bool) -> Result<()> {
+pub(crate) async fn set_bias_tee(
+    nios: &NiosCore,
+    direction: Direction,
+    enable: bool,
+) -> Result<()> {
     let mut reg = nios.read(Nios8x32::RfFrontend, 0).await?;
     if enable {
         reg |= 1 << bias_tee_bit(direction);
@@ -54,7 +58,7 @@ pub async fn set_bias_tee(nios: &NiosCore, direction: Direction, enable: bool) -
 }
 
 /// PLL lock detect, from the ADF4002 MUX-out pin.
-pub async fn pll_lock_state(nios: &NiosCore) -> Result<bool> {
+pub(crate) async fn pll_lock_state(nios: &NiosCore) -> Result<bool> {
     let reg = nios.read(Nios8x32::RfFrontend, 0).await?;
     Ok(reg & (1 << Control::AdfMuxout as u32) != 0)
 }

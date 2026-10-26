@@ -30,7 +30,7 @@ async fn spi_write(nios: &NiosCore, register: Register, value: u8) -> Result<()>
 /// Disable all automatic tracking control loops.
 ///
 /// Useful for manual IQ balance calibration or measuring DC offsets.
-pub async fn disable_tracking_control(nios: &NiosCore) -> Result<()> {
+pub(crate) async fn disable_tracking_control(nios: &NiosCore) -> Result<()> {
     spi_write(nios, Register::DcOffsetConfig2, DC_OFFSET_CONFIG2_MUST_BE_1).await?;
     spi_write(
         nios,

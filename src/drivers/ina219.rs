@@ -30,7 +30,7 @@ const RESET: u16 = 0x8000;
 
 /// Initialize the INA219: soft-reset, configure, and program the calibration
 /// register (required for current/power conversion).
-pub async fn init(nios: &NiosCore) -> Result<()> {
+pub(crate) async fn init(nios: &NiosCore) -> Result<()> {
     // Soft-reset the INA219
     nios.write(Nios8x16::Ina219, Address::Config.into(), RESET)
         .await?;
