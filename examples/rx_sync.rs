@@ -40,7 +40,7 @@ fn mhz(hz: u64) -> f64 {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     // ---- Open the device ----------------------------------------------------
-    let mut dev = BladeRf2::open_any()?;
+    let mut dev = BladeRf2::open_any().wait()?;
 
     // ---- Device information ------------------------------------------------
     out!("== Device ==");

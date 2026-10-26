@@ -23,7 +23,7 @@
 //! use bladerf2::{BladeRf2, Direction, MaybeFuture};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut dev = BladeRf2::open_any()?;
+//! let mut dev = BladeRf2::open_any().wait()?;
 //! println!("serial {}, FPGA {}", dev.serial()?, dev.fpga_version().wait()?);
 //!
 //! let rf = dev.rf_link_session();
@@ -106,9 +106,9 @@ use usb::UsbTransport;
 
 /// Handle to a bladeRF 2.0 micro.
 ///
-/// Obtain one with [`BladeRf2::open_any`] / [`BladeRf2::open_serial`]
-/// (blocking, native only) or [`BladeRf2::list_devices`] followed by
-/// [`BladeRf2::open_device`] (blocking or async, all targets).
+/// Obtain one with [`BladeRf2::open_any`] or [`BladeRf2::open_serial`], or
+/// with [`BladeRf2::list_devices`] and [`BladeRf2::open_device`] to choose a
+/// device yourself.
 ///
 /// The handle exposes read-only device information; everything that changes
 /// radio state goes through [`BladeRf2::rf_link_session`].
@@ -177,37 +177,28 @@ impl BladeRf2 {
         })
     }
 
-    /// List all attached bladeRF 2.0 devices (blocking, native only).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn enumerate() -> Result<Vec<DeviceInfo>> {
-        Self::list_devices().wait()
+    /// Open the first attached bladeRF 2.0.
+    pub fn open_any() -> impl MaybeFuture<Output = Result<Self>> {
+        maybe_future::operation(async {
+            let info = Self::list_devices()
+                .await?
+                .into_iter()
+                .next()
+                .ok_or(Error::NoDeviceFound)?;
+            Self::open_inner(info).await
+        })
     }
 
-    /// Open the first attached bladeRF 2.0 (blocking, native only).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn open_any() -> Result<Self> {
-        let info = Self::enumerate()?
-            .into_iter()
-            .next()
-            .ok_or(Error::NoDeviceFound)?;
-        Self::open(info)
-    }
-
-    /// Open the bladeRF 2.0 whose serial number starts with `serial`
-    /// (blocking, native only).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn open_serial(serial: &str) -> Result<Self> {
-        let info = Self::enumerate()?
-            .into_iter()
-            .find(|dev| dev.serial_number().is_some_and(|s| s.starts_with(serial)))
-            .ok_or(Error::NoDeviceFound)?;
-        Self::open(info)
-    }
-
-    /// Open the device described by `info` (blocking, native only).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn open(info: DeviceInfo) -> Result<Self> {
-        Self::open_device(info).wait()
+    /// Open the bladeRF 2.0 whose serial number starts with `serial`.
+    pub fn open_serial<'a>(serial: &'a str) -> impl MaybeFuture<Output = Result<Self>> + 'a {
+        maybe_future::operation(async move {
+            let info = Self::list_devices()
+                .await?
+                .into_iter()
+                .find(|dev| dev.serial_number().is_some_and(|s| s.starts_with(serial)))
+                .ok_or(Error::NoDeviceFound)?;
+            Self::open_inner(info).await
+        })
     }
 
     /// USB serial number of the device.

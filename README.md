@@ -30,7 +30,7 @@ bladerf2 = "0.1"
 use bladerf2::{BladeRf2, Direction, MaybeFuture};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut dev = BladeRf2::open_any()?;
+    let mut dev = BladeRf2::open_any().wait()?;
     println!("serial {}, FPGA {}", dev.serial()?, dev.fpga_version().wait()?);
 
     let rf = dev.rf_link_session();
