@@ -25,7 +25,7 @@ use crate::drivers;
 use crate::drivers::rfic::{GainMode, GainRange};
 use crate::error::Result;
 use crate::maybe_future;
-use crate::nios::{Nios8x32, Nios8x64, NiosCore};
+use crate::nios::{Nios8x64, NiosCore};
 use crate::stream::{RxStream, TxStream};
 use crate::usb::UsbTransport;
 
@@ -200,25 +200,14 @@ impl RfLinkSession<'_> {
 
     /// Whether FPGA RF loopback is enabled.
     pub fn loopback(&self) -> impl MaybeFuture<Output = Result<bool>> {
-        const MASK: u32 = 0x7 << 8;
-        const LOOPBACK: u32 = 4 << 8;
-        maybe_future::operation(async move {
-            let gpio = self.nios.read(Nios8x32::Control, 0).await?;
-            Ok((gpio & MASK) == LOOPBACK)
-        })
+        maybe_future::operation(drivers::fpga::loopback(self.nios))
     }
 
     /// Enable or disable FPGA RF loopback.
     pub fn set_loopback(&self, enable: bool) -> impl MaybeFuture<Output = Result<()>> {
-        const MASK: u32 = 0x7 << 8;
-        const LOOPBACK: u32 = 4 << 8;
         maybe_future::operation(async move {
-            let mut gpio = self.nios.read(Nios8x32::Control, 0).await?;
-            gpio &= !MASK;
-            if enable {
-                gpio |= LOOPBACK;
-            }
-            self.nios.write(Nios8x32::Control, 0, gpio).await
+            drivers::fpga::set_loopback(self.nios, enable).await?;
+            Ok(())
         })
     }
 
