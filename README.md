@@ -1,5 +1,7 @@
 # bladerf2
 
+[![CI](https://github.com/narottamroyal/bladerf2-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/narottamroyal/bladerf2-rs/actions/workflows/ci.yml)
+
 A pure Rust driver for the [bladeRF 2.0 micro](https://www.nuand.com/bladerf-2-0-micro/)
 software-defined radio.
 
