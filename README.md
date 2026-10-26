@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rx = rf.rx_stream(&[0])?;
     rx.activate().wait()?;
     let mut samples = vec![num_complex::Complex32::ZERO; rx.mtu()];
-    rx.read(&mut [&mut samples], None)?;
+    rx.read(&mut [&mut samples], None).wait()?;
     rx.deactivate().wait()?;
     Ok(())
 }
