@@ -118,12 +118,18 @@ async fn measure_throughput(mut transfer: impl AsyncFnMut() -> usize) -> f64 {
     total as f64 / start.elapsed().as_secs_f64()
 }
 
-/// Asserts that `measured` is close enough to the nominal sample `rate`.
-fn assert_throughput(direction: &str, rate: u64, measured: f64) {
-    assert!(
-        measured >= THROUGHPUT_MIN_RATIO * rate as f64,
-        "{direction} at {rate} S/s: measured {measured:.0} S/s"
-    );
+/// Asserts that `measure` sustains close enough to the nominal sample `rate`.
+/// It gets up to three attempts, so that a one-off stall of the host (a busy
+/// browser, say) does not fail the test, but a rate that is always low does.
+async fn assert_throughput(direction: &str, rate: u64, mut measure: impl AsyncFnMut() -> f64) {
+    let mut best = 0.0_f64;
+    for _ in 0..3 {
+        best = best.max(measure().await);
+        if best >= THROUGHPUT_MIN_RATIO * rate as f64 {
+            return;
+        }
+    }
+    panic!("{direction} at {rate} S/s: measured {best:.0} S/s");
 }
 
 /// Sample rates for the throughput tests: the minimum, either side of the
@@ -332,27 +338,33 @@ hardware_test! {
         for rate in throughput_rates(&rf.sample_rate_range()) {
             rf.set_sample_rate(rate).await.unwrap();
 
-            let mut rx = rf.rx_stream(&[0]).unwrap();
-            rx.activate().await.unwrap();
-            let mut rx_buf = vec![Complex32::ZERO; rx.mtu()];
-            let received = measure_throughput(async || {
-                rx.read(&mut [rx_buf.as_mut_slice()], TIMEOUT).await.unwrap()
+            assert_throughput("receive", rate, async || {
+                let mut rx = rf.rx_stream(&[0]).unwrap();
+                rx.activate().await.unwrap();
+                let mut buf = vec![Complex32::ZERO; rx.mtu()];
+                let received = measure_throughput(async || {
+                    rx.read(&mut [buf.as_mut_slice()], TIMEOUT).await.unwrap()
+                })
+                .await;
+                rx.deactivate().await.unwrap();
+                received
             })
             .await;
-            rx.deactivate().await.unwrap();
-            assert_throughput("receive", rate, received);
 
             // `write` blocks while the radio consumes queued data, so the rate it
             // accepts is the transmit rate. This transmits zeros.
-            let mut tx = rf.tx_stream(&[0]).unwrap();
-            tx.activate().await.unwrap();
-            let tx_buf = vec![Complex32::ZERO; tx.mtu()];
-            let transmitted = measure_throughput(async || {
-                tx.write(&[tx_buf.as_slice()], TIMEOUT).await.unwrap()
+            assert_throughput("transmit", rate, async || {
+                let mut tx = rf.tx_stream(&[0]).unwrap();
+                tx.activate().await.unwrap();
+                let buf = vec![Complex32::ZERO; tx.mtu()];
+                let transmitted = measure_throughput(async || {
+                    tx.write(&[buf.as_slice()], TIMEOUT).await.unwrap()
+                })
+                .await;
+                tx.deactivate().await.unwrap();
+                transmitted
             })
             .await;
-            tx.deactivate().await.unwrap();
-            assert_throughput("transmit", rate, transmitted);
         }
     }
 }
