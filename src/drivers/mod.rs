@@ -1,13 +1,13 @@
 //! Chip-level drivers for the bladeRF 2.0's peripherals and the board
 //! initialization sequence.
 
-pub mod ad5621;
-pub mod ad9361;
-pub mod adf4002;
-pub mod flash;
-pub mod ina219;
-pub mod rffe;
-pub mod rfic;
+pub(crate) mod ad5621;
+pub(crate) mod ad9361;
+pub(crate) mod adf4002;
+pub(crate) mod flash;
+pub(crate) mod ina219;
+pub(crate) mod rffe;
+pub(crate) mod rfic;
 
 use crate::error::{Error, Result};
 use crate::maybe_future;

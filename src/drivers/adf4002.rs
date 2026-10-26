@@ -21,12 +21,12 @@ const VCTCXO_HZ: u64 = 38_400_000;
 const PLL_ENABLE_BIT: u32 = 1 << 11;
 
 /// Program the power-up reference frequency.
-pub async fn init(nios: &NiosCore, dac: &Ad5621) -> Result<()> {
+pub(crate) async fn init(nios: &NiosCore, dac: &Ad5621) -> Result<()> {
     set_refclk(nios, dac, DEFAULT_REFCLK_HZ).await
 }
 
 /// Whether the PLL is driving the reference clock.
-pub async fn enabled(nios: &NiosCore) -> Result<bool> {
+pub(crate) async fn enabled(nios: &NiosCore) -> Result<bool> {
     Ok(nios.read(Nios8x32::Control, 0).await? & PLL_ENABLE_BIT != 0)
 }
 
@@ -34,13 +34,13 @@ pub async fn enabled(nios: &NiosCore) -> Result<bool> {
 ///
 /// The VCTCXO DAC and the PLL both drive the reference, so the DAC is
 /// released before the PLL is enabled and restored after it is disabled.
-pub async fn set_enabled(nios: &NiosCore, dac: &Ad5621, enable: bool) -> Result<()> {
+pub(crate) async fn set_enabled(nios: &NiosCore, dac: &Ad5621, enable: bool) -> Result<()> {
     if enable {
-        dac.disable(nios).await?;
+        dac.set_enabled(nios, false).await?;
         write_enable_bit(nios, true).await
     } else {
         write_enable_bit(nios, false).await?;
-        dac.enable(nios).await
+        dac.set_enabled(nios, true).await
     }
 }
 
@@ -57,7 +57,7 @@ async fn write_enable_bit(nios: &NiosCore, enable: bool) -> Result<()> {
 /// Program the reference frequency the PLL locks the VCTCXO to.
 ///
 /// The PLL is enabled while the dividers are written and restored afterwards.
-pub async fn set_refclk(nios: &NiosCore, dac: &Ad5621, ref_hz: u64) -> Result<()> {
+pub(crate) async fn set_refclk(nios: &NiosCore, dac: &Ad5621, ref_hz: u64) -> Result<()> {
     let (r, n) = calculate_pll_ratio(ref_hz, VCTCXO_HZ)?;
 
     let was_enabled = enabled(nios).await?;
@@ -78,7 +78,7 @@ pub async fn set_refclk(nios: &NiosCore, dac: &Ad5621, ref_hz: u64) -> Result<()
 
 /// Reference frequency the PLL is programmed for, in Hz, from the R and N
 /// divider registers.
-pub async fn refclk(nios: &NiosCore) -> Result<u64> {
+pub(crate) async fn refclk(nios: &NiosCore) -> Result<u64> {
     let r = u64::from((nios.read(Nios8x32::Adf400x, 0).await? >> 2) & 0x3FFF);
     let n = u64::from((nios.read(Nios8x32::Adf400x, 1).await? >> 8) & 0x1FFF);
     if n == 0 {

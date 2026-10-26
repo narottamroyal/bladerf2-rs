@@ -10,7 +10,7 @@ use crate::usb::{AltSetting, UsbCommand, UsbTransport};
 ///
 /// Parses the length-prefixed, CRC-protected key-value strings and returns
 /// the `DACxxxx` entry. Falls back to `0x1FFC` if parsing fails.
-pub async fn read_vctcxo_trim(transport: &UsbTransport) -> Result<u16> {
+pub(crate) async fn read_vctcxo_trim(transport: &UsbTransport) -> Result<u16> {
     let data = read_cal_data(transport).await?;
     let decoder = BinKv::new(data.as_slice());
     for entry in decoder {
