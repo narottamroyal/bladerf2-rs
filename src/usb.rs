@@ -8,6 +8,7 @@ use nusb::{
     transfer::{Bulk, Completion, ControlIn, ControlType, EndpointDirection, Recipient},
 };
 
+use crate::channel::Direction;
 use crate::error::{Error, Result};
 use crate::maybe_future;
 
@@ -32,7 +33,7 @@ pub(crate) enum AltSetting {
 /// USB endpoint addresses for the RfLink alternate setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub(crate) enum Endpoint {
+pub(crate) enum EndpointAddress {
     /// Bulk IN endpoint for RX samples.
     SampleIn = 0x81,
     /// Bulk OUT endpoint for TX samples.
@@ -136,66 +137,44 @@ impl UsbTransport {
     }
 
     /// Send a vendor command and return the response data.
-    pub(crate) async fn vendor_command(&self, command: UsbCommand, length: u16) -> Result<Vec<u8>> {
-        let data = maybe_future::usb(self.interface.control_in(
-            ControlIn {
-                control_type: ControlType::Vendor,
-                recipient: Recipient::Device,
-                request: command as u8,
-                value: 0,
-                index: 0,
-                length,
-            },
-            VENDOR_TIMEOUT,
-        ))
-        .await?;
-        Ok(data)
-    }
-
-    /// Send a vendor command with an enable/disable parameter and verify the
-    /// response status word.
-    pub(crate) async fn vendor_command_enable(
+    pub(crate) async fn vendor_command(
         &self,
         command: UsbCommand,
-        enable: bool,
-    ) -> Result<()> {
-        let data = maybe_future::usb(self.interface.control_in(
-            ControlIn {
-                control_type: ControlType::Vendor,
-                recipient: Recipient::Device,
-                request: command as u8,
-                value: enable.into(),
-                index: 0,
-                length: size_of::<u32>() as u16,
-            },
-            VENDOR_TIMEOUT,
-        ))
-        .await?;
+        value: u16,
+        length: u16,
+    ) -> Result<Vec<u8>> {
+        let request = ControlIn {
+            control_type: ControlType::Vendor,
+            recipient: Recipient::Device,
+            request: command as u8,
+            value,
+            index: 0,
+            length,
+        };
+        Ok(maybe_future::usb(self.interface.control_in(request, VENDOR_TIMEOUT)).await?)
+    }
 
-        let data: [u8; 4] = data.try_into().map_err(|_| Error::ValueConversion)?;
-        if u32::from_le_bytes(data) == 0 {
+    /// Enable or disable a streaming module, checking the status word the
+    /// firmware returns.
+    pub(crate) async fn enable_module(&self, direction: Direction, enable: bool) -> Result<()> {
+        let command = match direction {
+            Direction::Rx => UsbCommand::RfRx,
+            Direction::Tx => UsbCommand::RfTx,
+        };
+        let status = self.vendor_command(command, enable.into(), 4).await?;
+        let status: [u8; 4] = status.try_into().map_err(|_| Error::ValueConversion)?;
+        if u32::from_le_bytes(status) == 0 {
             Ok(())
         } else {
             Err(Error::UsbVendor)
         }
     }
 
-    /// Enable or disable a streaming module.
-    pub(crate) async fn enable_module(
-        &self,
-        direction: crate::Direction,
-        enable: bool,
-    ) -> Result<()> {
-        let command = match direction {
-            crate::Direction::Rx => UsbCommand::RfRx,
-            crate::Direction::Tx => UsbCommand::RfTx,
-        };
-        self.vendor_command_enable(command, enable).await
-    }
-
     /// Query whether the device firmware reports ready.
     pub(crate) async fn is_firmware_ready(&self) -> Result<bool> {
-        let data = self.vendor_command(UsbCommand::QueryDeviceReady, 1).await?;
+        let data = self
+            .vendor_command(UsbCommand::QueryDeviceReady, 0, 1)
+            .await?;
         Ok(data.first() == Some(&1))
     }
 }

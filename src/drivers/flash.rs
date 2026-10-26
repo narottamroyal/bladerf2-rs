@@ -33,7 +33,7 @@ pub(crate) async fn read_vctcxo_trim(transport: &UsbTransport) -> Result<u16> {
 async fn read_cal_data(transport: &UsbTransport) -> Result<Vec<u8>> {
     transport.change_setting(AltSetting::SpiFlash).await?;
     let data = transport
-        .vendor_command(UsbCommand::ReadCalCache, 256)
+        .vendor_command(UsbCommand::ReadCalCache, 0, 256)
         .await?;
     transport.change_setting(AltSetting::RfLink).await?;
     Ok(data)

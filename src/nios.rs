@@ -18,7 +18,7 @@ use nusb::{
 
 use crate::error::{Error, Result};
 use crate::maybe_future::with_timeout;
-use crate::usb::{self, Endpoint};
+use crate::usb::{self, EndpointAddress};
 
 /// Timeout for a NIOS request/response exchange.
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -41,8 +41,7 @@ macro_rules! impl_nios_data {
         $(
             impl NiosData for $t {
                 fn read(buf: &[u8]) -> Option<Self> {
-                    let buf: &[u8; size_of::<$t>()] = buf.get(..size_of::<$t>())?.try_into().ok()?;
-                    Some(<$t>::from_le_bytes(*buf))
+                    Some(<$t>::from_le_bytes(*buf.first_chunk()?))
                 }
                 fn write(self, buf: &mut [u8]) {
                     buf[..size_of::<$t>()].copy_from_slice(&self.to_le_bytes());
@@ -270,8 +269,8 @@ impl NiosCore {
     // shared on one thread there; one type serves both targets.
     #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
     pub(crate) fn new(interface: &Interface) -> Result<Self> {
-        let out = interface.endpoint::<Bulk, Out>(Endpoint::PeripheralOut as u8)?;
-        let input = interface.endpoint::<Bulk, In>(Endpoint::PeripheralIn as u8)?;
+        let out = interface.endpoint::<Bulk, Out>(EndpointAddress::PeripheralOut as u8)?;
+        let input = interface.endpoint::<Bulk, In>(EndpointAddress::PeripheralIn as u8)?;
         let in_size = Io::in_size(&input);
         Ok(Self {
             io: Arc::new(Mutex::new(Some(Io {
