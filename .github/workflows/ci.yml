@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Hardware tests need a bladeRF, so CI only builds them. Warnings are denied
+# through clippy and rustdoc rather than RUSTFLAGS, which would replace the
+# wasm rustflags in .cargo/config.toml.
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo fmt --check
+        working-directory: examples/rx_web
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --features smol,hardware-tests -- -D warnings
+      - run: cargo clippy --all-targets --features tokio -- -D warnings
+      - run: cargo test
+      - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            examples/rx_web -> target
+      - run: cargo clippy --target wasm32-unknown-unknown --lib --tests --features hardware-tests -- -D warnings
+      - run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+        working-directory: examples/rx_web
