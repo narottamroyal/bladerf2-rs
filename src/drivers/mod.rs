@@ -5,6 +5,7 @@ pub(crate) mod ad5621;
 pub(crate) mod ad9361;
 pub(crate) mod adf4002;
 pub(crate) mod flash;
+pub(crate) mod fpga;
 pub(crate) mod ina219;
 pub(crate) mod rffe;
 pub(crate) mod rfic;
