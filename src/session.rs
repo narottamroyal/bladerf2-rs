@@ -9,7 +9,7 @@
 //! ```no_run
 //! # use bladerf2::{BladeRf2, Direction, MaybeFuture};
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut dev = BladeRf2::open_any()?;
+//! let mut dev = BladeRf2::open_any().wait()?;
 //! let rf = dev.rf_link_session();
 //! rf.set_frequency(Direction::Rx, 915_000_000).wait()?;
 //! # Ok(())

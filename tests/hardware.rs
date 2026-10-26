@@ -129,8 +129,8 @@ impl Drop for Loopback<'_, '_> {
 /// cascading into the tests that run after it.
 fn open() -> BladeRf2 {
     let mut dev = match std::env::var("BLADERF2_SERIAL") {
-        Ok(prefix) => BladeRf2::open_serial(&prefix),
-        Err(_) => BladeRf2::open_any(),
+        Ok(prefix) => BladeRf2::open_serial(&prefix).wait(),
+        Err(_) => BladeRf2::open_any().wait(),
     }
     .expect("open bladeRF 2.0 micro");
     {
@@ -144,7 +144,7 @@ fn open() -> BladeRf2 {
 #[test]
 #[serial]
 fn enumerate_finds_a_device() {
-    assert!(!BladeRf2::enumerate().unwrap().is_empty());
+    assert!(!BladeRf2::list_devices().wait().unwrap().is_empty());
 }
 
 #[test]
