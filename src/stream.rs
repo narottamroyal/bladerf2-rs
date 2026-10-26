@@ -4,9 +4,8 @@
 //! `[-1.0, 1.0)` by dividing by 2048. Dual-channel streams interleave both
 //! channels on the wire (`I0, Q0, I1, Q1, ...`).
 //!
-//! `read`/`write` are thin synchronous wrappers around `read_async`/
-//! `write_async` (via the crate's blocking adapter); `activate`/`deactivate`
-//! are plain `async fn`s usable from either context.
+//! Every operation returns a [`MaybeFuture`]: call `.wait()` to block, or
+//! `.await` it from async code.
 
 use crate::channel::{Channel, Direction};
 use crate::error::{Error, Result};
@@ -246,33 +245,26 @@ impl RxStream {
         })
     }
 
-    /// Blocking read; `timeout` bounds the wait for data (`None` = forever).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn read(
-        &mut self,
-        buffers: &mut [&mut [Complex32]],
-        timeout: Option<Duration>,
-    ) -> Result<usize> {
-        maybe_future::block_on(self.read_async(buffers, timeout))
-    }
-
-    /// Asynchronous read; `timeout` bounds the wait for data (`None` = forever).
+    /// Reads one buffer per channel. `timeout` bounds the wait for data
+    /// (`None` = forever).
     ///
     /// Fills every buffer completely. Excess data received from a USB transfer
     /// is buffered and returned by later calls.
-    pub async fn read_async(
-        &mut self,
-        buffers: &mut [&mut [Complex32]],
+    pub fn read<'a>(
+        &'a mut self,
+        buffers: &'a mut [&'a mut [Complex32]],
         timeout: Option<Duration>,
-    ) -> Result<usize> {
-        if buffers.len() != self.channels.len() {
-            return Err(Error::ChannelConfig);
-        }
-        match buffers.len() {
-            1 => with_timeout(self.read_single(buffers[0]), timeout).await,
-            2 => with_timeout(self.read_dual(buffers), timeout).await,
-            _ => Err(Error::ChannelConfig),
-        }
+    ) -> impl MaybeFuture<Output = Result<usize>> + 'a {
+        maybe_future::operation(async move {
+            if buffers.len() != self.channels.len() {
+                return Err(Error::ChannelConfig);
+            }
+            match buffers.len() {
+                1 => with_timeout(self.read_single(buffers[0]), timeout).await,
+                2 => with_timeout(self.read_dual(buffers), timeout).await,
+                _ => Err(Error::ChannelConfig),
+            }
+        })
     }
 
     async fn read_single(&mut self, buffer: &mut [Complex32]) -> Result<usize> {
@@ -426,26 +418,23 @@ impl TxStream {
         })
     }
 
-    /// Blocking write; `timeout` bounds the wait for buffer space (`None` = forever).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn write(&mut self, buffers: &[&[Complex32]], timeout: Option<Duration>) -> Result<usize> {
-        maybe_future::block_on(self.write_async(buffers, timeout))
-    }
-
-    /// Asynchronous write; `timeout` bounds the wait for buffer space (`None` = forever).
-    pub async fn write_async(
-        &mut self,
-        buffers: &[&[Complex32]],
+    /// Writes one buffer per channel. `timeout` bounds the wait for buffer
+    /// space (`None` = forever).
+    pub fn write<'a>(
+        &'a mut self,
+        buffers: &'a [&'a [Complex32]],
         timeout: Option<Duration>,
-    ) -> Result<usize> {
-        if buffers.len() != self.channels.len() {
-            return Err(Error::ChannelConfig);
-        }
-        match buffers.len() {
-            1 => with_timeout(self.write_single(buffers[0]), timeout).await,
-            2 => with_timeout(self.write_dual(buffers), timeout).await,
-            _ => Err(Error::ChannelConfig),
-        }
+    ) -> impl MaybeFuture<Output = Result<usize>> + 'a {
+        maybe_future::operation(async move {
+            if buffers.len() != self.channels.len() {
+                return Err(Error::ChannelConfig);
+            }
+            match buffers.len() {
+                1 => with_timeout(self.write_single(buffers[0]), timeout).await,
+                2 => with_timeout(self.write_dual(buffers), timeout).await,
+                _ => Err(Error::ChannelConfig),
+            }
+        })
     }
 
     async fn write_single(&mut self, buffer: &[Complex32]) -> Result<usize> {

@@ -97,12 +97,12 @@ fn encode(index: usize) -> Complex32 {
 /// Reads one buffer, failing unless it is filled completely.
 fn read_full(rx: &mut RxStream, buf: &mut [Complex32]) {
     let len = buf.len();
-    assert_eq!(rx.read(&mut [buf], TIMEOUT).unwrap(), len);
+    assert_eq!(rx.read(&mut [buf], TIMEOUT).wait().unwrap(), len);
 }
 
 /// Writes one buffer, failing unless all of it is accepted.
 fn write_full(tx: &mut TxStream, buf: &[Complex32]) {
-    assert_eq!(tx.write(&[buf], TIMEOUT).unwrap(), buf.len());
+    assert_eq!(tx.write(&[buf], TIMEOUT).wait().unwrap(), buf.len());
 }
 
 /// Calls `step` repeatedly for `window`.
@@ -349,8 +349,11 @@ fn throughput() {
         let mut rx = rf.rx_stream(&[0]).unwrap();
         rx.activate().wait().unwrap();
         let mut rx_buf = vec![Complex32::ZERO; rx.mtu()];
-        let received =
-            measure_throughput(|| rx.read(&mut [rx_buf.as_mut_slice()], TIMEOUT).unwrap());
+        let received = measure_throughput(|| {
+            rx.read(&mut [rx_buf.as_mut_slice()], TIMEOUT)
+                .wait()
+                .unwrap()
+        });
         rx.deactivate().wait().unwrap();
         assert_throughput("receive", rate, received);
 
@@ -361,7 +364,8 @@ fn throughput() {
         let mut tx = rf.tx_stream(&[0]).unwrap();
         tx.activate().wait().unwrap();
         let tx_buf = vec![Complex32::ZERO; tx.mtu()];
-        let transmitted = measure_throughput(|| tx.write(&[tx_buf.as_slice()], TIMEOUT).unwrap());
+        let transmitted =
+            measure_throughput(|| tx.write(&[tx_buf.as_slice()], TIMEOUT).wait().unwrap());
         tx.deactivate().wait().unwrap();
         drop(loopback);
         assert_throughput("transmit", rate, transmitted);
@@ -390,8 +394,13 @@ fn siso_loopback() {
     let mut rx_data = vec![Complex32::ZERO; n];
     for block in 0..16 {
         let tx_data: Vec<_> = (0..n).map(|i| encode(block * n + i)).collect();
-        assert_eq!(tx.write(&[tx_data.as_slice()], TIMEOUT).unwrap(), n);
-        assert_eq!(rx.read(&mut [rx_data.as_mut_slice()], TIMEOUT).unwrap(), n);
+        assert_eq!(tx.write(&[tx_data.as_slice()], TIMEOUT).wait().unwrap(), n);
+        assert_eq!(
+            rx.read(&mut [rx_data.as_mut_slice()], TIMEOUT)
+                .wait()
+                .unwrap(),
+            n
+        );
         assert_loopback(&tx_data, &rx_data);
     }
 
@@ -435,11 +444,13 @@ fn mimo_loopback() {
 
         assert_eq!(
             tx.write(&[tx0.as_slice(), tx1.as_slice()], TIMEOUT)
+                .wait()
                 .unwrap(),
             n
         );
         assert_eq!(
             rx.read(&mut [rx0.as_mut_slice(), rx1.as_mut_slice()], TIMEOUT)
+                .wait()
                 .unwrap(),
             n
         );

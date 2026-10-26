@@ -140,7 +140,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     out!("\n== Receive {BUFFERS} x {} samples ==", samples.len());
     rx.activate().await?;
     for i in 0..BUFFERS {
-        let n = rx.read_async(&mut [&mut samples], Some(TIMEOUT)).await?;
+        let n = rx.read(&mut [&mut samples], Some(TIMEOUT)).await?;
         let power = samples[..n].iter().map(|s| s.norm_sqr()).sum::<f32>() / n as f32;
         let peak = samples[..n].iter().map(|s| s.norm()).fold(0.0, f32::max);
         out!(
