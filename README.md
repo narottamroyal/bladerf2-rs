@@ -85,8 +85,9 @@ changes each setting and reads it back; and receives a few buffers of samples.
 - **Setting RX gain.** The radio only applies a new RX gain while an RX channel
   is enabled. When no RX channels are active, `set_gain()` briefly enables and then
   disables an RX channel, so that `gain()` reads the new value straight back.
-- **Always `deactivate` streams.** Dropping an active stream deactivates it on a
-  best-effort basis only (asynchronously on wasm), so deactivate explicitly.
+- **Always `deactivate` streams.** Dropping an active stream only stops it on
+  native targets. In the browser it keeps running until the next stream in that
+  direction is activated, or the device is opened again.
 - **USB 3.0.** Streaming needs a SuperSpeed connection. Where the platform
   reports the link speed, opening a device on a slower link fails with
   `Error::UsbSpeed`. WebUSB does not report it.

@@ -153,15 +153,7 @@ impl BladeRf2 {
     }
 
     async fn open_inner(info: DeviceInfo) -> Result<Self> {
-        let device = maybe_future::usb(info.open()).await?;
-
-        if let Some(speed) = device.speed()
-            && speed != nusb::Speed::Super
-        {
-            return Err(Error::UsbSpeed);
-        }
-
-        let interface = maybe_future::usb(device.claim_interface(0)).await?;
+        let interface = Self::claim(&info).await?;
 
         // The RF-link firmware exposes exactly four alternate settings.
         if interface.descriptors().count() != 4 {
@@ -170,11 +162,42 @@ impl BladeRf2 {
 
         let transport = UsbTransport::new(interface, info);
         let (nios, dac) = drivers::init(&transport).await?;
+        stream::disable_all(&nios, &transport).await?;
         Ok(Self {
             transport,
             nios,
             dac,
         })
+    }
+
+    /// Open the device and claim its interface.
+    ///
+    /// Dropping a device in the browser releases it without waiting, so the
+    /// release can still be in progress here and make this fail. Retry until
+    /// it finishes, which usually takes one retry.
+    async fn claim(info: &DeviceInfo) -> Result<nusb::Interface> {
+        #[cfg(target_arch = "wasm32")]
+        for _ in 0..20 {
+            match Self::try_claim(info).await {
+                Err(Error::Usb(_)) => {
+                    maybe_future::sleep(std::time::Duration::from_millis(10)).await
+                }
+                result => return result,
+            }
+        }
+        Self::try_claim(info).await
+    }
+
+    async fn try_claim(info: &DeviceInfo) -> Result<nusb::Interface> {
+        let device = maybe_future::usb(info.open()).await?;
+
+        if let Some(speed) = device.speed()
+            && speed != nusb::Speed::Super
+        {
+            return Err(Error::UsbSpeed);
+        }
+
+        Ok(maybe_future::usb(device.claim_interface(0)).await?)
     }
 
     /// Open the first attached bladeRF 2.0.

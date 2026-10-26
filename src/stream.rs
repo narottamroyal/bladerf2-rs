@@ -8,6 +8,7 @@
 //! `.await` it from async code.
 
 use crate::channel::{Channel, Direction};
+use crate::drivers::rfic;
 use crate::error::{Error, Result};
 use crate::maybe_future::{self, with_timeout};
 use crate::nios::NiosCore;
@@ -17,10 +18,19 @@ use nusb::MaybeFuture;
 use nusb::transfer::{Buffer, Bulk, EndpointDirection, In, Out, TransferError};
 use std::time::Duration;
 
-/// Requested size of each USB bulk transfer, in bytes.
-const TRANSFER_SIZE: usize = 8192;
-/// Maximum transfers queued with the OS to keep the pipe full.
+/// Requested size of each USB bulk transfer, in bytes, and the most transfers
+/// queued with the OS to keep the pipe full. Each WebUSB transfer is a round
+/// trip through the browser, so the browser needs larger ones to keep up at
+/// high sample rates.
+#[cfg(not(target_arch = "wasm32"))]
+const TRANSFER_SIZE: usize = 8 * 1024;
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_PENDING: usize = 4;
+#[cfg(target_arch = "wasm32")]
+const TRANSFER_SIZE: usize = 128 * 1024;
+#[cfg(target_arch = "wasm32")]
+const MAX_PENDING: usize = 16;
+
 /// Longest `deactivate` waits for queued transfers before stopping the radio.
 const COLLECT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -63,53 +73,49 @@ fn extend_i16_le(out: &mut Vec<i16>, bytes: &[u8]) {
     );
 }
 
-// ==================== Channel enable / disable ====================
+// ==================== Radio path ====================
 
-fn parse_channels(direction: Direction, channels: &[usize]) -> Result<Vec<Channel>> {
-    let (ch0, ch1) = match direction {
-        Direction::Rx => (Channel::Rx0, Channel::Rx1),
-        Direction::Tx => (Channel::Tx0, Channel::Tx1),
-    };
-    match channels {
-        [0] => Ok(vec![ch0]),
-        [1] => Ok(vec![ch1]),
-        [0, 1] => Ok(vec![ch0, ch1]),
+/// Channels of `direction` selected by `indices` (one of `[0]`, `[1]`, `[0, 1]`).
+fn parse_channels(direction: Direction, indices: &[usize]) -> Result<Vec<Channel>> {
+    let all = all_channels(direction);
+    match indices {
+        [0] | [1] | [0, 1] => Ok(indices.iter().map(|&i| all[i]).collect()),
         _ => Err(Error::ChannelConfig),
     }
 }
 
-/// Enable/disable RFIC channels and the USB data path, in the order that
-/// avoids glitches (RFIC first on bring-up, USB path first on teardown).
-async fn set_path_enabled(
-    nios: &NiosCore,
-    transport: &UsbTransport,
-    channels: &[Channel],
-    direction: Direction,
-    enable: bool,
-) -> Result<()> {
-    if enable {
-        for &channel in channels {
-            crate::drivers::rfic::enable_module(nios, channel, true).await?;
-        }
-        transport.enable_module(direction, true).await
-    } else {
-        transport.enable_module(direction, false).await?;
-        for &channel in channels {
-            crate::drivers::rfic::enable_module(nios, channel, false).await?;
-        }
-        Ok(())
+fn all_channels(direction: Direction) -> [Channel; 2] {
+    match direction {
+        Direction::Rx => [Channel::Rx0, Channel::Rx1],
+        Direction::Tx => [Channel::Tx0, Channel::Tx1],
     }
 }
 
-/// Best-effort teardown for `Drop`, where errors cannot be reported.
-fn teardown(transport: UsbTransport, nios: NiosCore, channels: Vec<Channel>, direction: Direction) {
-    let cleanup = async move {
-        let _ = set_path_enabled(&nios, &transport, &channels, direction, false).await;
-    };
-    #[cfg(not(target_arch = "wasm32"))]
-    maybe_future::block_on(cleanup);
-    #[cfg(target_arch = "wasm32")]
-    wasm_bindgen_futures::spawn_local(cleanup);
+/// Disables RFIC channels, then the direction's USB path.
+///
+/// This order matters: disabling the USB path first, while the radio still
+/// pulls samples, can leave the FX3 TX DMA stuck so the next TX stream stalls.
+async fn disable(
+    nios: &NiosCore,
+    transport: &UsbTransport,
+    direction: Direction,
+    channels: &[Channel],
+) -> Result<()> {
+    for &channel in channels {
+        rfic::enable_module(nios, channel, false).await?;
+    }
+    transport.enable_module(direction, false).await
+}
+
+/// Disables every channel and both USB paths.
+///
+/// Channel state outlives the USB connection, so a session that ended without
+/// stopping its streams would otherwise corrupt the next one's samples.
+pub(crate) async fn disable_all(nios: &NiosCore, transport: &UsbTransport) -> Result<()> {
+    for direction in [Direction::Rx, Direction::Tx] {
+        disable(nios, transport, direction, &all_channels(direction)).await?;
+    }
+    Ok(())
 }
 
 /// Waits for queued transfers on a bulk endpoint to finish. Cancelled
@@ -131,29 +137,89 @@ async fn drain<D: EndpointDirection>(endpoint: &mut nusb::Endpoint<Bulk, D>) -> 
     Ok(())
 }
 
-/// Stops a stream and leaves its endpoint idle.
-///
-/// Native cancels queued transfers first: stopping with transfers queued
-/// times out at high sample rates. WebUSB cannot cancel, so its queue drains
-/// while the radio still runs.
-async fn stop_stream<D: EndpointDirection>(
-    endpoint: &mut nusb::Endpoint<Bulk, D>,
-    transport: &UsbTransport,
-    nios: &NiosCore,
-    channels: &[Channel],
+/// A stream's endpoint and radio path, shared by [`RxStream`] and [`TxStream`].
+struct Path<D: EndpointDirection> {
+    endpoint: nusb::Endpoint<Bulk, D>,
+    transport: UsbTransport,
+    nios: NiosCore,
     direction: Direction,
-) -> Result<()> {
-    #[cfg(not(target_arch = "wasm32"))]
-    endpoint.cancel_all();
-    #[cfg(target_arch = "wasm32")]
-    drain(endpoint).await?;
+    channels: Vec<Channel>,
+    /// Whether the path may be enabled, so `Drop` has to stop it.
+    active: bool,
+}
 
-    set_path_enabled(nios, transport, channels, direction, false).await?;
+impl<D: EndpointDirection> Path<D> {
+    fn new(
+        transport: &UsbTransport,
+        nios: &NiosCore,
+        direction: Direction,
+        address: EndpointAddress,
+        channels: &[usize],
+    ) -> Result<Self> {
+        Ok(Self {
+            endpoint: transport.interface().endpoint::<Bulk, D>(address as u8)?,
+            transport: transport.clone(),
+            nios: nios.clone(),
+            direction,
+            channels: parse_channels(direction, channels)?,
+            active: false,
+        })
+    }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    drain(endpoint).await?;
-    maybe_future::usb(endpoint.clear_halt()).await?;
-    Ok(())
+    /// Enables this stream's channels, then the USB path. The direction's
+    /// other channel is disabled, in case a stream dropped while active left
+    /// it on (see [`RxStream`]).
+    async fn start(&mut self) -> Result<()> {
+        self.active = true;
+        for channel in all_channels(self.direction) {
+            let enable = self.channels.contains(&channel);
+            rfic::enable_module(&self.nios, channel, enable).await?;
+        }
+        self.transport.enable_module(self.direction, true).await
+    }
+
+    /// Stops the path and leaves the endpoint idle.
+    ///
+    /// Native cancels queued transfers first: stopping with transfers queued
+    /// times out at high sample rates. WebUSB cannot cancel, so its queue
+    /// drains while the radio still runs. Transfers still queued when the path
+    /// is disabled leave the endpoint unusable.
+    async fn stop(&mut self) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.endpoint.cancel_all();
+        #[cfg(target_arch = "wasm32")]
+        if self.direction == Direction::Rx {
+            // In loopback, RX data only arrives while TX sends, so read from
+            // the RFIC until the queue drains. Loopback stops with RX anyway.
+            let looped = crate::drivers::fpga::set_loopback(&self.nios, false).await?;
+            let drained = drain(&mut self.endpoint).await;
+            crate::drivers::fpga::set_loopback(&self.nios, looped).await?;
+            drained?;
+        } else {
+            drain(&mut self.endpoint).await?;
+        }
+
+        disable(&self.nios, &self.transport, self.direction, &self.channels).await?;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        drain(&mut self.endpoint).await?;
+        maybe_future::usb(self.endpoint.clear_halt()).await?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl<D: EndpointDirection> Drop for Path<D> {
+    /// Stops an active stream. Not possible on wasm, where `Drop` cannot wait
+    /// for USB.
+    fn drop(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.active
+            && let Err(error) = maybe_future::block_on(self.stop())
+        {
+            tracing::warn!(?error, direction = ?self.direction, "stream did not stop cleanly");
+        }
+    }
 }
 
 // ==================== RxStream ====================
@@ -161,15 +227,16 @@ async fn stop_stream<D: EndpointDirection>(
 /// Receive sample stream.
 ///
 /// Call [`activate`](RxStream::activate) before reading and
-/// [`deactivate`](RxStream::deactivate) when done. Dropping the stream
-/// deactivates it best-effort. Received-but-unconsumed samples are buffered
-/// across `read` calls, so short transfers never lose data.
+/// [`deactivate`](RxStream::deactivate) when done. Received-but-unconsumed
+/// samples are buffered across `read` calls, so short transfers never lose
+/// data.
+///
+/// Dropping an active stream stops it on native targets. In the browser it
+/// keeps running until the next stream in the same direction is activated, or
+/// the device is opened again.
 pub struct RxStream {
-    endpoint: nusb::Endpoint<Bulk, In>,
+    path: Path<In>,
     in_size: usize,
-    transport: UsbTransport,
-    nios: NiosCore,
-    channels: Vec<Channel>,
     /// Samples received from USB but not yet handed to the caller.
     pending: Vec<i16>,
 }
@@ -177,7 +244,7 @@ pub struct RxStream {
 impl std::fmt::Debug for RxStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RxStream")
-            .field("channels", &self.channels)
+            .field("channels", &self.path.channels)
             .field("pending_samples", &self.pending.len())
             .finish_non_exhaustive()
     }
@@ -190,56 +257,41 @@ impl RxStream {
         nios: &NiosCore,
         channels: &[usize],
     ) -> Result<Self> {
-        let endpoint = transport
-            .interface()
-            .endpoint::<Bulk, In>(EndpointAddress::SampleIn as u8)?;
-        let in_size = usb::aligned_size(TRANSFER_SIZE, endpoint.max_packet_size());
+        let path = Path::new(
+            transport,
+            nios,
+            Direction::Rx,
+            EndpointAddress::SampleIn,
+            channels,
+        )?;
+        let in_size = usb::aligned_size(TRANSFER_SIZE, path.endpoint.max_packet_size());
         Ok(Self {
-            endpoint,
+            path,
             in_size,
-            transport: transport.clone(),
-            nios: nios.clone(),
-            channels: parse_channels(Direction::Rx, channels)?,
             pending: Vec::with_capacity(TRANSFER_SIZE / 2),
         })
     }
 
     /// Number of channels carried by this stream.
     pub fn num_channels(&self) -> usize {
-        self.channels.len()
+        self.path.channels.len()
     }
 
     /// Recommended maximum samples per channel per `read` call.
     pub fn mtu(&self) -> usize {
-        TRANSFER_SIZE / 4 / self.channels.len()
+        TRANSFER_SIZE / 4 / self.path.channels.len()
     }
 
     /// Activate the stream (enables the RFIC modules and USB RX path).
     pub fn activate(&mut self) -> impl MaybeFuture<Output = Result<()>> + '_ {
-        maybe_future::operation(async move {
-            set_path_enabled(
-                &self.nios,
-                &self.transport,
-                &self.channels,
-                Direction::Rx,
-                true,
-            )
-            .await
-        })
+        maybe_future::operation(self.path.start())
     }
 
     /// Deactivate the stream and discard samples that were received but not
     /// yet read.
     pub fn deactivate(&mut self) -> impl MaybeFuture<Output = Result<()>> + '_ {
         maybe_future::operation(async move {
-            stop_stream(
-                &mut self.endpoint,
-                &self.transport,
-                &self.nios,
-                &self.channels,
-                Direction::Rx,
-            )
-            .await?;
+            self.path.stop().await?;
             self.pending.clear();
             Ok(())
         })
@@ -256,7 +308,7 @@ impl RxStream {
         timeout: Option<Duration>,
     ) -> impl MaybeFuture<Output = Result<usize>> + 'a {
         maybe_future::operation(async move {
-            if buffers.len() != self.channels.len() {
+            if buffers.len() != self.path.channels.len() {
                 return Err(Error::ChannelConfig);
             }
             match buffers.len() {
@@ -309,30 +361,12 @@ impl RxStream {
 
     /// Top up in-flight transfers and consume one completion into `pending`.
     async fn fill_pending(&mut self) -> Result<()> {
-        while self.endpoint.pending() < MAX_PENDING {
-            self.endpoint.submit(Buffer::new(self.in_size));
+        while self.path.endpoint.pending() < MAX_PENDING {
+            self.path.endpoint.submit(Buffer::new(self.in_size));
         }
-        let buffer = usb::next_in(&mut self.endpoint).await?;
+        let buffer = usb::next_in(&mut self.path.endpoint).await?;
         extend_i16_le(&mut self.pending, &buffer);
         Ok(())
-    }
-}
-
-impl Drop for RxStream {
-    fn drop(&mut self) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.endpoint.cancel_all();
-            if let Err(error) = maybe_future::block_on(drain(&mut self.endpoint)) {
-                tracing::warn!(?error, "queued RX transfers did not drain");
-            }
-        }
-        teardown(
-            self.transport.clone(),
-            self.nios.clone(),
-            self.channels.clone(),
-            Direction::Rx,
-        );
     }
 }
 
@@ -341,20 +375,17 @@ impl Drop for RxStream {
 /// Transmit sample stream.
 ///
 /// Call [`activate`](TxStream::activate) before writing and
-/// [`deactivate`](TxStream::deactivate) when done (deactivate drains queued
-/// samples first). Dropping the stream deactivates it best-effort.
+/// [`deactivate`](TxStream::deactivate) when done. Dropping an active stream
+/// behaves as for [`RxStream`].
 pub struct TxStream {
-    endpoint: nusb::Endpoint<Bulk, Out>,
+    path: Path<Out>,
     transfer_size: usize,
-    transport: UsbTransport,
-    nios: NiosCore,
-    channels: Vec<Channel>,
 }
 
 impl std::fmt::Debug for TxStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TxStream")
-            .field("channels", &self.channels)
+            .field("channels", &self.path.channels)
             .finish_non_exhaustive()
     }
 }
@@ -366,56 +397,40 @@ impl TxStream {
         nios: &NiosCore,
         channels: &[usize],
     ) -> Result<Self> {
-        let endpoint = transport
-            .interface()
-            .endpoint::<Bulk, Out>(EndpointAddress::SampleOut as u8)?;
-        let transfer_size = usb::aligned_size(TRANSFER_SIZE, endpoint.max_packet_size());
+        let path = Path::new(
+            transport,
+            nios,
+            Direction::Tx,
+            EndpointAddress::SampleOut,
+            channels,
+        )?;
+        let transfer_size = usb::aligned_size(TRANSFER_SIZE, path.endpoint.max_packet_size());
         Ok(Self {
-            endpoint,
+            path,
             transfer_size,
-            transport: transport.clone(),
-            nios: nios.clone(),
-            channels: parse_channels(Direction::Tx, channels)?,
         })
     }
 
     /// Number of channels carried by this stream.
     pub fn num_channels(&self) -> usize {
-        self.channels.len()
+        self.path.channels.len()
     }
 
     /// Recommended maximum samples per channel per `write` call.
     pub fn mtu(&self) -> usize {
-        TRANSFER_SIZE / 4 / self.channels.len()
+        TRANSFER_SIZE / 4 / self.path.channels.len()
     }
 
     /// Activate the stream (enables the RFIC modules and USB TX path).
     pub fn activate(&mut self) -> impl MaybeFuture<Output = Result<()>> + '_ {
-        maybe_future::operation(async move {
-            set_path_enabled(
-                &self.nios,
-                &self.transport,
-                &self.channels,
-                Direction::Tx,
-                true,
-            )
-            .await
-        })
+        maybe_future::operation(self.path.start())
     }
 
-    /// Deactivate the stream. Samples that were written but not yet
-    /// transmitted are discarded, so the tail of a burst can be cut off.
+    /// Deactivate the stream. On native targets, samples that were written but
+    /// not yet transmitted are discarded, so the tail of a burst can be cut
+    /// off. In the browser they are transmitted first.
     pub fn deactivate(&mut self) -> impl MaybeFuture<Output = Result<()>> + '_ {
-        maybe_future::operation(async move {
-            stop_stream(
-                &mut self.endpoint,
-                &self.transport,
-                &self.nios,
-                &self.channels,
-                Direction::Tx,
-            )
-            .await
-        })
+        maybe_future::operation(self.path.stop())
     }
 
     /// Writes one buffer per channel. `timeout` bounds the wait for buffer
@@ -426,7 +441,7 @@ impl TxStream {
         timeout: Option<Duration>,
     ) -> impl MaybeFuture<Output = Result<usize>> + 'a {
         maybe_future::operation(async move {
-            if buffers.len() != self.channels.len() {
+            if buffers.len() != self.path.channels.len() {
                 return Err(Error::ChannelConfig);
             }
             match buffers.len() {
@@ -470,31 +485,13 @@ impl TxStream {
         let mut sent = 0;
         while sent < bytes.len() {
             let end = (sent + self.transfer_size).min(bytes.len());
-            self.endpoint.submit(bytes[sent..end].to_vec().into());
+            self.path.endpoint.submit(bytes[sent..end].to_vec().into());
             sent = end;
-            while self.endpoint.pending() >= MAX_PENDING {
-                usb::next_out(&mut self.endpoint).await?;
+            while self.path.endpoint.pending() >= MAX_PENDING {
+                usb::next_out(&mut self.path.endpoint).await?;
             }
         }
         Ok(())
-    }
-}
-
-impl Drop for TxStream {
-    fn drop(&mut self) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.endpoint.cancel_all();
-            if let Err(error) = maybe_future::block_on(drain(&mut self.endpoint)) {
-                tracing::warn!(?error, "queued TX transfers did not drain");
-            }
-        }
-        teardown(
-            self.transport.clone(),
-            self.nios.clone(),
-            self.channels.clone(),
-            Direction::Tx,
-        );
     }
 }
 
