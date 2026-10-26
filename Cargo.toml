@@ -18,12 +18,11 @@ tokio = ["nusb/tokio"]
 hardware-tests = []
 
 [dependencies]
-bytemuck = "1"
 futures-lite = "2"
 # The wasm-bindgen feature swaps in browser timers on wasm; inert on native.
 futures-timer = { version = "3", features = ["wasm-bindgen"] }
 nusb = "0.2.8"
-num-complex = { version = "0.4", features = ["bytemuck"] }
+num-complex = "0.4"
 thiserror = "2"
 tracing = "0.1"
 
