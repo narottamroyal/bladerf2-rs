@@ -2,22 +2,16 @@
 
 [![CI](https://github.com/narottamroyal/bladerf2-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/narottamroyal/bladerf2-rs/actions/workflows/ci.yml)
 
-A pure Rust driver for the [bladeRF 2.0 micro](https://www.nuand.com/bladerf-2-0-micro/)
-software-defined radio.
+A pure Rust driver for the [bladeRF 2.0 micro](https://www.nuand.com/bladerf-2-0-micro/),
+using [`nusb`](https://crates.io/crates/nusb) for USB. It needs no native libraries, and
+runs on any platform that `nusb` supports as well as in the browser
+(`wasm32-unknown-unknown`) over WebUSB.
 
-The driver talks to the radio directly over USB with [`nusb`](https://crates.io/crates/nusb).
-There is no vendor library or other native dependency to install, and the same code
-runs in the browser through WebUSB.
-
-- **Blocking or async.** Every device operation returns a `MaybeFuture`: call
-  `.wait()` to block (no async runtime needed) or `.await` it.
-- **Native and WebAssembly.** Any platform supported by `nusb` (developed and
-  tested on Linux), and `wasm32-unknown-unknown` through WebUSB.
-- **Safe by construction.** All RF configuration goes through an `RfLinkSession`
-  that borrows the device mutably, so the compiler guarantees only one session
-  is active at a time.
-- **Streaming.** `RxStream` and `TxStream` own their USB endpoints, so sample
-  I/O never contends with configuration calls.
+- Every device operation returns a `MaybeFuture`: call `.wait()` to block, or `.await` it.
+- Radio configuration goes through an `RfLinkSession`, which borrows the device
+  mutably, so only one can exist at a time.
+- `RxStream` and `TxStream` own their USB endpoints, so streaming does not wait
+  on configuration calls.
 
 ## Usage
 
@@ -57,50 +51,46 @@ let rf = dev.rf_link_session();
 rf.set_frequency(Direction::Rx, 100_000_000).await?;
 ```
 
-On native targets, `.await` needs one of the `smol` or `tokio` cargo features so
-nusb can run blocking USB calls on a runtime; the blocking API and WebAssembly
-need neither.
+On native targets, `.await` needs the `smol` or `tokio` feature so that `nusb` can
+run blocking USB calls on a runtime. The blocking API and the browser need neither.
 
 ### In the browser
 
-Browsers only expose USB devices the user has granted. Ask for permission with
-`navigator.usb.requestDevice` from a user gesture (a button click), then use
-`BladeRf2::list_devices()` and `BladeRf2::open_device(info)` as above: they
-return the granted devices. The `rx_web` example shows the complete flow.
+The browser only lists devices that the user has granted to the page. Ask for
+one with `navigator.usb.requestDevice` from a user gesture, such as a button
+click, then use `BladeRf2::list_devices()` and `BladeRf2::open_device(info)` as
+above. The `rx_web` example shows the whole flow.
 
 ## Examples
 
-`rx_sync`, `rx_async` and `rx_web` are deliberately near-identical. Each one
-prints the serial number, FPGA version, VCTCXO trim and RX source; lists the supported frequency, sample rate, bandwidth and gain ranges;
-changes each setting and reads it back; and receives a few buffers of samples.
+Each example prints the device information, lists the supported ranges, changes
+each setting and reads it back, and receives a few buffers of samples.
 
 | Example | Run with |
 | --- | --- |
 | `rx_sync` | `cargo run --release --example rx_sync` |
 | `rx_async` | `cargo run --release --features smol --example rx_async` |
-| `rx_web` | `cd examples/rx_web && trunk serve --open` (needs [`trunk`](https://trunkrs.dev); use a Chromium-based browser) |
+| `rx_web` | `cd examples/rx_web && trunk serve --open` (needs [`trunk`](https://trunkrs.dev) and a Chromium-based browser) |
 
 ## Things to know
 
-- **Sample rate at power-up.** The radio boots at 30.72 Msps. Set a rate you can
-  sustain before streaming.
-- **Setting RX gain.** The radio only applies a new RX gain while an RX channel
-  is enabled. When no RX channels are active, `set_gain()` briefly enables and then
-  disables an RX channel, so that `gain()` reads the new value straight back.
-- **Always `deactivate` streams.** Dropping an active stream only stops it on
-  native targets. In the browser it keeps running until the next stream in that
-  direction is activated, or the device is opened again.
-- **USB 3.0.** Streaming needs a SuperSpeed connection. Where the platform
-  reports the link speed, opening a device on a slower link fails with
-  `Error::UsbSpeed`. WebUSB does not report it.
-
-### Permissions
-
-- **Linux:** allow access to the device with a udev rule, for example
-  `SUBSYSTEM=="usb", ATTRS{idVendor}=="2cf0", ATTRS{idProduct}=="5250", MODE="0666"`
-  in `/etc/udev/rules.d/`, or install Nuand's rules. The same permission is
-  needed for WebUSB in the browser.
-- **Windows:** the device needs a WinUSB-compatible driver (for example via Zadig).
+- **USB 3.0.** Streaming needs a SuperSpeed connection. On native targets,
+  opening a device on a slower link fails with `Error::UsbSpeed`. WebUSB cannot
+  report the link speed, so the browser does not check it.
+- **Permissions.** On Linux, allow access to the device with a udev rule in
+  `/etc/udev/rules.d/`; the browser needs the same access:
+  `SUBSYSTEM=="usb", ATTRS{idVendor}=="2cf0", ATTRS{idProduct}=="5250", MODE="0666"`.
+  On Windows, the device needs a WinUSB driver, which you can install with Zadig.
+- **Sample rate.** The radio powers up at 30.72 MS/s. Set a rate you can sustain
+  before streaming.
+- **RX gain.** The radio only applies a new RX gain while an RX channel is
+  enabled. With none enabled, `set_gain()` briefly enables one so that `gain()`
+  reads the new value back.
+- **Deactivate streams.** On native targets, dropping an active stream stops it.
+  In the browser it keeps running until the next stream in that direction is
+  activated, or the device is opened again.
+- **MIMO loopback.** FPGA 0.16.0 loses samples in MIMO digital loopback. SISO
+  loopback is unaffected.
 
 ## Testing
 
@@ -110,13 +100,10 @@ Unit tests need no hardware:
 cargo test
 ```
 
-Hardware tests need a bladeRF 2.0 micro attached and the `hardware-tests`
-feature. They share the device, so run them one at a time. Each test runs in up
-to three modes, from one source:
-
-- **blocking** (native): the blocking path that `.wait()` uses.
-- **asynchronous** (native, needs the `smol` feature): real async USB.
-- **browser** (wasm): see [Browser tests](#browser-tests).
+Hardware tests need a bladeRF 2.0 micro and the `hardware-tests` feature.
+Because they share the device, they must run one at a time. Each test runs in up
+to three modes: `blocking`, `asynchronous` (which needs the `smol` feature) and
+`browser`.
 
 Blocking:
 
@@ -136,8 +123,8 @@ Both:
 cargo test --features hardware-tests,smol -- --test-threads=1
 ```
 
-To choose a device when several are attached, set `BLADERF2_SERIAL` to a
-serial-number prefix:
+To choose a device when several are attached, set `BLADERF2_SERIAL` to a prefix
+of its serial number:
 
 ```sh
 BLADERF2_SERIAL=c504 cargo test --features hardware-tests -- --test-threads=1
@@ -145,18 +132,18 @@ BLADERF2_SERIAL=c504 cargo test --features hardware-tests -- --test-threads=1
 
 ### Browser tests
 
-WebUSB only exists in a browser, so these run in headless Chromium (Node.js has
-no `navigator.usb`). They need `chromium` and `chromedriver` (Linux only);
-`chromedriver` must be on `PATH`, or set `CHROMEDRIVER`.
+The browser tests run in headless Chromium, and have only been validated on
+Linux. They need `chromium` and `chromedriver`; `chromedriver` must be on `PATH`,
+or set `CHROMEDRIVER` to its location.
 
-Allow the device for the test origin without a prompt, once, by installing a
-Chromium managed policy:
+Before the first run, install a Chromium policy that lets the test page use the
+device without a permission prompt:
 
 ```sh
 sudo scripts/browser-policy.sh install
 ```
 
-Run the tests (they take turns on the device):
+Run the tests:
 
 ```sh
 cargo test --target wasm32-unknown-unknown --features hardware-tests --test hardware
@@ -168,19 +155,9 @@ Remove the policy:
 sudo scripts/browser-policy.sh remove
 ```
 
-Notes:
-
-- The policy applies to every Chromium profile, but only for the bladeRF 2.0
-  micro on `http://127.0.0.1:8123`, the test server's address
-  (`.cargo/config.toml`). Port 8123 must be free while the tests run.
-- A test that panics aborts the wasm module, so the tests after it time out.
-- Only Chromium on Linux is covered. Chrome, macOS and Windows use different
-  policy locations.
-
-## Status
-
-Receive is exercised by the examples. The transmit path (`TxStream`) is
-available but not covered by them.
+The policy only applies to the bladeRF 2.0 micro on `http://127.0.0.1:8123`, the
+test server's address, so port 8123 must be free while the tests run. If a test
+panics, the remaining browser tests time out.
 
 ## License
 
