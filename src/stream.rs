@@ -16,22 +16,21 @@ use crate::usb::{self, Endpoint as EndpointAddress, UsbTransport};
 use num_complex::Complex32;
 use nusb::MaybeFuture;
 use nusb::transfer::{Buffer, Bulk, EndpointDirection, In, Out, TransferError};
+use std::collections::VecDeque;
 use std::time::Duration;
 
-/// Requested size of each USB bulk transfer, in bytes, and the most transfers
-/// queued with the OS to keep the pipe full. Each WebUSB transfer is a round
-/// trip through the browser, so the browser needs larger ones to keep up at
-/// high sample rates.
+/// Size of each USB bulk transfer, in bytes. It is a multiple of every USB
+/// packet size, as IN transfers require. Each WebUSB transfer is a round trip
+/// through the browser, so the browser needs larger ones to keep up at high
+/// sample rates.
 #[cfg(not(target_arch = "wasm32"))]
 const TRANSFER_SIZE: usize = 16 * 1024;
-#[cfg(not(target_arch = "wasm32"))]
-const MAX_PENDING: usize = 16;
 #[cfg(target_arch = "wasm32")]
 const TRANSFER_SIZE: usize = 128 * 1024;
-#[cfg(target_arch = "wasm32")]
+/// Most transfers queued with the OS, to keep the pipe full.
 const MAX_PENDING: usize = 16;
 
-/// Longest `deactivate` waits for queued transfers before stopping the radio.
+/// Longest `deactivate` waits for each queued transfer to finish.
 const COLLECT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Q11 full-scale: samples span `[-2048, 2047]`.
@@ -45,32 +44,21 @@ fn clamp_q11(value: f32) -> i16 {
         .clamp(-Q11_SCALE, Q11_SCALE - 1.0) as i16
 }
 
-/// Convert SC16 Q11 samples (interleaved i16 I/Q pairs) to [`Complex32`].
-fn q11_to_c32(input: &[i16], output: &mut [Complex32]) {
-    let scale = 1.0 / Q11_SCALE;
-    for (pair, out) in input.as_chunks::<2>().0.iter().zip(output) {
-        out.re = pair[0] as f32 * scale;
-        out.im = pair[1] as f32 * scale;
-    }
+/// Convert one SC16 Q11 sample (little-endian I, then Q) to [`Complex32`].
+fn q11_to_c32(sample: &[u8; 4]) -> Complex32 {
+    let [i0, i1, q0, q1] = *sample;
+    Complex32::new(
+        f32::from(i16::from_le_bytes([i0, i1])) / Q11_SCALE,
+        f32::from(i16::from_le_bytes([q0, q1])) / Q11_SCALE,
+    )
 }
 
-/// Convert [`Complex32`] samples to interleaved SC16 Q11.
-fn c32_to_q11(input: &[Complex32], output: &mut [i16]) {
-    for (sample, pair) in input.iter().zip(output.as_chunks_mut::<2>().0.iter_mut()) {
-        pair[0] = clamp_q11(sample.re);
-        pair[1] = clamp_q11(sample.im);
-    }
-}
-
-/// Append little-endian i16 samples decoded from `bytes` to `out`.
-fn extend_i16_le(out: &mut Vec<i16>, bytes: &[u8]) {
-    out.extend(
-        bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|c| i16::from_le_bytes(*c)),
-    );
+/// Convert a [`Complex32`] to one SC16 Q11 sample (little-endian I, then Q),
+/// clamping it to the Q11 range.
+fn c32_to_q11(sample: Complex32) -> [u8; 4] {
+    let [i0, i1] = clamp_q11(sample.re).to_le_bytes();
+    let [q0, q1] = clamp_q11(sample.im).to_le_bytes();
+    [i0, i1, q0, q1]
 }
 
 // ==================== Radio path ====================
@@ -149,13 +137,11 @@ struct Path<D: EndpointDirection> {
 }
 
 impl<D: EndpointDirection> Path<D> {
-    fn new(
-        transport: &UsbTransport,
-        nios: &NiosCore,
-        direction: Direction,
-        address: EndpointAddress,
-        channels: &[usize],
-    ) -> Result<Self> {
+    fn new(transport: &UsbTransport, nios: &NiosCore, channels: &[usize]) -> Result<Self> {
+        let (direction, address) = match D::DIR {
+            nusb::transfer::Direction::In => (Direction::Rx, EndpointAddress::SampleIn),
+            nusb::transfer::Direction::Out => (Direction::Tx, EndpointAddress::SampleOut),
+        };
         Ok(Self {
             endpoint: transport.interface().endpoint::<Bulk, D>(address as u8)?,
             transport: transport.clone(),
@@ -164,6 +150,16 @@ impl<D: EndpointDirection> Path<D> {
             channels: parse_channels(direction, channels)?,
             active: false,
         })
+    }
+
+    /// The length of `buffers`, which must hold one buffer per channel, all of
+    /// the same length.
+    fn buffer_len<B: AsRef<[Complex32]>>(&self, buffers: &[B]) -> Result<usize> {
+        let len = buffers.first().map_or(0, |b| b.as_ref().len());
+        if buffers.len() != self.channels.len() || buffers.iter().any(|b| b.as_ref().len() != len) {
+            return Err(Error::ChannelConfig);
+        }
+        Ok(len)
     }
 
     /// Enables this stream's channels, then the USB path. The direction's
@@ -233,25 +229,25 @@ impl<D: EndpointDirection> Drop for Path<D> {
 /// Receive sample stream.
 ///
 /// Call [`activate`](RxStream::activate) before reading and
-/// [`deactivate`](RxStream::deactivate) when done. Received-but-unconsumed
-/// samples are buffered across `read` calls, so short transfers never lose
-/// data.
+/// [`deactivate`](RxStream::deactivate) when done. Samples received but not yet
+/// read are kept for the next `read`, so reads of any size lose nothing.
 ///
 /// Dropping an active stream stops it on native targets. In the browser it
 /// keeps running until the next stream in the same direction is activated, or
 /// the device is opened again.
 pub struct RxStream {
     path: Path<In>,
-    in_size: usize,
-    /// Samples received from USB but not yet handed to the caller.
-    pending: Vec<i16>,
+    /// Completed transfers that have not been read in full, oldest first.
+    received: VecDeque<Buffer>,
+    /// Bytes of the oldest received transfer that have already been read.
+    offset: usize,
 }
 
 impl std::fmt::Debug for RxStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RxStream")
             .field("channels", &self.path.channels)
-            .field("pending_samples", &self.pending.len())
+            .field("buffered_bytes", &self.buffered())
             .finish_non_exhaustive()
     }
 }
@@ -263,18 +259,10 @@ impl RxStream {
         nios: &NiosCore,
         channels: &[usize],
     ) -> Result<Self> {
-        let path = Path::new(
-            transport,
-            nios,
-            Direction::Rx,
-            EndpointAddress::SampleIn,
-            channels,
-        )?;
-        let in_size = usb::aligned_size(TRANSFER_SIZE, path.endpoint.max_packet_size());
         Ok(Self {
-            path,
-            in_size,
-            pending: Vec::with_capacity(TRANSFER_SIZE / 2),
+            path: Path::new(transport, nios, channels)?,
+            received: VecDeque::new(),
+            offset: 0,
         })
     }
 
@@ -298,7 +286,8 @@ impl RxStream {
     pub fn deactivate(&mut self) -> impl MaybeFuture<Output = Result<()>> + '_ {
         maybe_future::operation(async move {
             self.path.stop().await?;
-            self.pending.clear();
+            self.received.clear();
+            self.offset = 0;
             Ok(())
         })
     }
@@ -307,72 +296,66 @@ impl RxStream {
     /// (`None` = forever).
     ///
     /// Fills every buffer completely. Excess data received from a USB transfer
-    /// is buffered and returned by later calls.
+    /// is kept and returned by later calls, and a timeout discards nothing.
     pub fn read<'a>(
         &'a mut self,
         buffers: &'a mut [&'a mut [Complex32]],
         timeout: Option<Duration>,
     ) -> impl MaybeFuture<Output = Result<usize>> + 'a {
         maybe_future::operation(async move {
-            if buffers.len() != self.path.channels.len() {
-                return Err(Error::ChannelConfig);
-            }
-            match buffers.len() {
-                1 => with_timeout(self.read_single(buffers[0]), timeout).await,
-                2 => with_timeout(self.read_dual(buffers), timeout).await,
-                _ => Err(Error::ChannelConfig),
-            }
+            let len = self.path.buffer_len(buffers)?;
+            with_timeout(self.receive(len * buffers.len() * 4), timeout).await?;
+            self.copy_out(buffers);
+            Ok(len)
         })
     }
 
-    async fn read_single(&mut self, buffer: &mut [Complex32]) -> Result<usize> {
-        let chunk = buffer.len();
-        let samples_needed = chunk * 2;
-        while self.pending.len() < samples_needed {
-            self.fill_pending().await?;
-        }
-        q11_to_c32(&self.pending[..samples_needed], buffer);
-        self.pending.drain(..samples_needed);
-        Ok(chunk)
+    /// Unread bytes in the received transfers, counting whole samples only.
+    fn buffered(&self) -> usize {
+        let received: usize = self.received.iter().map(|t| t.len() / 4 * 4).sum();
+        received - self.offset
     }
 
-    async fn read_dual(&mut self, buffers: &mut [&mut [Complex32]]) -> Result<usize> {
-        let [buf0, buf1] = buffers else {
-            return Err(Error::ChannelConfig);
-        };
-        if buf0.len() != buf1.len() {
-            return Err(Error::ChannelConfig);
+    /// Waits until the received transfers hold at least `bytes` unread bytes,
+    /// keeping up to `MAX_PENDING` transfers queued with the OS. Nothing is
+    /// read here, so stopping early loses no samples.
+    async fn receive(&mut self, bytes: usize) -> Result<()> {
+        while self.buffered() < bytes {
+            while self.path.endpoint.pending() < MAX_PENDING {
+                self.path.endpoint.submit(Buffer::new(TRANSFER_SIZE));
+            }
+            let transfer = usb::next_in(&mut self.path.endpoint).await?;
+            self.received.push_back(transfer);
         }
-        let chunk = buf0.len();
-        // Wire format interleaves channels: I0, Q0, I1, Q1 per sample pair.
-        let samples_needed = chunk * 4;
-        while self.pending.len() < samples_needed {
-            self.fill_pending().await?;
-        }
-        let raw = &self.pending[..samples_needed];
-        for (i, (s0, s1)) in buf0.iter_mut().zip(buf1.iter_mut()).enumerate() {
-            let base = i * 4;
-            *s0 = Complex32::new(
-                raw[base] as f32 / Q11_SCALE,
-                raw[base + 1] as f32 / Q11_SCALE,
-            );
-            *s1 = Complex32::new(
-                raw[base + 2] as f32 / Q11_SCALE,
-                raw[base + 3] as f32 / Q11_SCALE,
-            );
-        }
-        self.pending.drain(..samples_needed);
-        Ok(chunk)
-    }
-
-    /// Top up in-flight transfers and consume one completion into `pending`.
-    async fn fill_pending(&mut self) -> Result<()> {
-        while self.path.endpoint.pending() < MAX_PENDING {
-            self.path.endpoint.submit(Buffer::new(self.in_size));
-        }
-        let buffer = usb::next_in(&mut self.path.endpoint).await?;
-        extend_i16_le(&mut self.pending, &buffer);
         Ok(())
+    }
+
+    /// Converts samples from the received transfers into `buffers`, which
+    /// [`receive`](Self::receive) has made sure are available. Sample `k` on the
+    /// wire belongs to channel `k % channels` (see the module docs). Transfers
+    /// are submitted again once they have been read in full.
+    fn copy_out(&mut self, buffers: &mut [&mut [Complex32]]) {
+        let channels = buffers.len();
+        let total = buffers[0].len() * channels;
+        let mut k = 0;
+        while k < total {
+            let transfer = self.received.front().expect("receive buffered enough");
+            let samples = transfer[self.offset..].as_chunks::<4>().0;
+            let count = samples.len().min(total - k);
+            for (sample, k) in samples[..count].iter().zip(k..) {
+                buffers[k % channels][k / channels] = q11_to_c32(sample);
+            }
+            k += count;
+            self.offset += count * 4;
+
+            if self.offset + 4 > transfer.len() {
+                let transfer = self.received.pop_front().expect("front exists");
+                self.offset = 0;
+                if self.path.endpoint.pending() < MAX_PENDING {
+                    self.path.endpoint.submit(transfer);
+                }
+            }
+        }
     }
 }
 
@@ -385,7 +368,6 @@ impl RxStream {
 /// behaves as for [`RxStream`].
 pub struct TxStream {
     path: Path<Out>,
-    transfer_size: usize,
 }
 
 impl std::fmt::Debug for TxStream {
@@ -403,17 +385,8 @@ impl TxStream {
         nios: &NiosCore,
         channels: &[usize],
     ) -> Result<Self> {
-        let path = Path::new(
-            transport,
-            nios,
-            Direction::Tx,
-            EndpointAddress::SampleOut,
-            channels,
-        )?;
-        let transfer_size = usb::aligned_size(TRANSFER_SIZE, path.endpoint.max_packet_size());
         Ok(Self {
-            path,
-            transfer_size,
+            path: Path::new(transport, nios, channels)?,
         })
     }
 
@@ -447,52 +420,29 @@ impl TxStream {
         timeout: Option<Duration>,
     ) -> impl MaybeFuture<Output = Result<usize>> + 'a {
         maybe_future::operation(async move {
-            if buffers.len() != self.path.channels.len() {
-                return Err(Error::ChannelConfig);
-            }
-            match buffers.len() {
-                1 => with_timeout(self.write_single(buffers[0]), timeout).await,
-                2 => with_timeout(self.write_dual(buffers), timeout).await,
-                _ => Err(Error::ChannelConfig),
-            }
+            let len = self.path.buffer_len(buffers)?;
+            with_timeout(self.send(buffers), timeout).await?;
+            Ok(len)
         })
     }
 
-    async fn write_single(&mut self, buffer: &[Complex32]) -> Result<usize> {
-        let mut raw = vec![0i16; buffer.len() * 2];
-        c32_to_q11(buffer, &mut raw);
-        self.write_raw(bytemuck::cast_slice(&raw)).await?;
-        Ok(buffer.len())
-    }
+    /// Converts `buffers` straight into transfers and submits them, waiting
+    /// while `MAX_PENDING` transfers are queued with the OS. Sample `k` on the
+    /// wire comes from channel `k % channels` (see the module docs).
+    async fn send(&mut self, buffers: &[&[Complex32]]) -> Result<()> {
+        let channels = buffers.len();
+        let total = buffers[0].len() * channels;
+        let mut k = 0;
+        while k < total {
+            let count = (TRANSFER_SIZE / 4).min(total - k);
+            let mut transfer = Buffer::new(count * 4);
+            let samples = transfer.extend_fill(count * 4, 0).as_chunks_mut::<4>().0;
+            for (sample, k) in samples.iter_mut().zip(k..) {
+                *sample = c32_to_q11(buffers[k % channels][k / channels]);
+            }
+            self.path.endpoint.submit(transfer);
+            k += count;
 
-    async fn write_dual(&mut self, buffers: &[&[Complex32]]) -> Result<usize> {
-        let [buf0, buf1] = buffers else {
-            return Err(Error::ChannelConfig);
-        };
-        if buf0.len() != buf1.len() {
-            return Err(Error::ChannelConfig);
-        }
-        let chunk = buf0.len();
-        let mut raw = vec![0i16; chunk * 4];
-        for (i, (s0, s1)) in buf0.iter().zip(buf1.iter()).enumerate() {
-            let base = i * 4;
-            raw[base] = clamp_q11(s0.re);
-            raw[base + 1] = clamp_q11(s0.im);
-            raw[base + 2] = clamp_q11(s1.re);
-            raw[base + 3] = clamp_q11(s1.im);
-        }
-        self.write_raw(bytemuck::cast_slice(&raw)).await?;
-        Ok(chunk)
-    }
-
-    /// Send bytes over the sample pipe, applying backpressure once more than
-    /// `MAX_PENDING` transfers are queued with the OS.
-    async fn write_raw(&mut self, bytes: &[u8]) -> Result<()> {
-        let mut sent = 0;
-        while sent < bytes.len() {
-            let end = (sent + self.transfer_size).min(bytes.len());
-            self.path.endpoint.submit(bytes[sent..end].to_vec().into());
-            sent = end;
             while self.path.endpoint.pending() >= MAX_PENDING {
                 usb::next_out(&mut self.path.endpoint).await?;
             }
@@ -509,35 +459,43 @@ mod tests {
 
     #[test]
     fn q11_to_c32_scales_correctly() {
-        let input = [0i16, 2048, -2048, 1024];
-        let mut output = [Complex32::ZERO; 2];
-        q11_to_c32(&input, &mut output);
-        assert_eq!(output[0], Complex32::new(0.0, 1.0));
-        assert_eq!(output[1], Complex32::new(-1.0, 0.5));
+        // I = 0, Q = 2048; I = -2048, Q = 1024 (little-endian).
+        assert_eq!(
+            q11_to_c32(&[0x00, 0x00, 0x00, 0x08]),
+            Complex32::new(0.0, 1.0)
+        );
+        assert_eq!(
+            q11_to_c32(&[0x00, 0xF8, 0x00, 0x04]),
+            Complex32::new(-1.0, 0.5)
+        );
+    }
+
+    #[test]
+    fn q11_to_c32_decodes_little_endian() {
+        let sample = q11_to_c32(&[0x01, 0x00, 0x00, 0x80]);
+        assert_eq!(
+            sample,
+            Complex32::new(1.0 / Q11_SCALE, -32768.0 / Q11_SCALE)
+        );
     }
 
     #[test]
     fn c32_to_q11_scales_and_clamps() {
-        let input = [Complex32::new(0.0, 0.5), Complex32::new(2.0, -2.0)];
-        let mut output = [0i16; 4];
-        c32_to_q11(&input, &mut output);
-        assert_eq!(output, [0, 1024, 2047, -2048]);
+        // I = 0, Q = 1024; I = 2047, Q = -2048 (little-endian).
+        assert_eq!(
+            c32_to_q11(Complex32::new(0.0, 0.5)),
+            [0x00, 0x00, 0x00, 0x04]
+        );
+        assert_eq!(
+            c32_to_q11(Complex32::new(2.0, -2.0)),
+            [0xFF, 0x07, 0x00, 0xF8]
+        );
     }
 
     #[test]
     fn conversion_roundtrip_for_representable_samples() {
-        let input = [Complex32::new(0.5, -0.25), Complex32::new(-0.5, 0.25)];
-        let mut q11 = [0i16; 4];
-        c32_to_q11(&input, &mut q11);
-        let mut roundtrip = [Complex32::ZERO; 2];
-        q11_to_c32(&q11, &mut roundtrip);
-        assert_eq!(input, roundtrip);
-    }
-
-    #[test]
-    fn extend_i16_le_decodes_little_endian() {
-        let mut out = Vec::new();
-        extend_i16_le(&mut out, &[0x01, 0x00, 0x00, 0x80]);
-        assert_eq!(out, [1, -32768]);
+        for sample in [Complex32::new(0.5, -0.25), Complex32::new(-0.5, 0.25)] {
+            assert_eq!(q11_to_c32(&c32_to_q11(sample)), sample);
+        }
     }
 }

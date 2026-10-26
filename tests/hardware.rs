@@ -461,14 +461,23 @@ hardware_test! {
         for channels in [&[0][..], &[1], &[0, 1]] {
             let mut rx = rf.rx_stream(channels).unwrap();
             rx.activate().await.unwrap();
-            let n = rx.mtu();
-            let mut buffers = vec![vec![Complex32::ZERO; n]; channels.len()];
+            let mtu = rx.mtu();
+            let mut buffers = vec![vec![Complex32::ZERO; mtu]; channels.len()];
             // The counter restarts at 256 whenever RX is enabled.
             let mut expected = 256;
-            for _ in 0..16 {
-                let mut refs: Vec<_> = buffers.iter_mut().map(Vec::as_mut_slice).collect();
-                assert_eq!(rx.read(&mut refs, TIMEOUT).await.unwrap(), n);
-                for i in 0..n {
+            // Reads of varying sizes span transfers and leave samples for the
+            // next read. Every fourth read has no time to wait: whether or not
+            // it times out, the counter must carry on without a gap.
+            let lens = [mtu, 1000, 1, 2047, mtu / 2 + 3];
+            for (read, len) in lens.into_iter().cycle().take(32).enumerate() {
+                let timeout = if read % 4 == 3 { Some(Duration::ZERO) } else { TIMEOUT };
+                let mut refs: Vec<_> = buffers.iter_mut().map(|b| &mut b[..len]).collect();
+                match rx.read(&mut refs, timeout).await {
+                    Ok(n) => assert_eq!(n, len),
+                    Err(bladerf2::Error::Timeout) => continue,
+                    Err(error) => panic!("read failed: {error}"),
+                }
+                for i in 0..len {
                     let sample = buffers[0][i];
                     let value = (sample.re * 2048.0).round() as i32;
                     assert_eq!(value, expected, "channels {channels:?}, sample {i}");
