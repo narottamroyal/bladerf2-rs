@@ -234,6 +234,32 @@ hardware_test! {
 }
 
 hardware_test! {
+    fn abandoned_request(dev) {
+        // A request dropped before its response arrives must not leave that
+        // response to be taken as the answer to the next request.
+        use std::future::IntoFuture;
+        const FREQUENCY: u64 = 915_000_000;
+        let rf = dev.rf_link_session();
+        rf.set_frequency(Direction::Rx, FREQUENCY).await.unwrap();
+
+        {
+            let mut read = std::pin::pin!(rf.sample_rate().into_future());
+            // Poll once, so the request is sent, then drop it.
+            std::future::poll_fn(|cx| {
+                let _ = read.as_mut().poll(cx);
+                std::task::Poll::Ready(())
+            })
+            .await;
+        }
+
+        for _ in 0..3 {
+            let frequency = rf.frequency(Direction::Rx).await.unwrap();
+            assert!(frequency.abs_diff(FREQUENCY) <= 5, "read {frequency} Hz");
+        }
+    }
+}
+
+hardware_test! {
     fn gain(dev) {
         let rf = dev.rf_link_session();
 
