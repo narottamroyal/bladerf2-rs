@@ -70,13 +70,15 @@ impl<'a> Iterator for BinKv<'a> {
         let end = start + length;
         let crc_end = end + 2;
 
+        // The entries after a bad one cannot be located, so stop there.
         if crc_end > self.data.len() {
+            self.offset = self.data.len();
             return Some(Err("calibration data is truncated"));
         }
-
         let calculated_crc = checksum(&self.data[self.offset..end]);
         let stored_crc = u16::from_le_bytes([self.data[end], self.data[end + 1]]);
         if calculated_crc != stored_crc {
+            self.offset = self.data.len();
             return Some(Err("calibration entry checksum mismatch"));
         }
 
@@ -102,4 +104,43 @@ fn checksum(data: &[u8]) -> u16 {
         }
         ret
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A calibration entry: length, contents, then CRC.
+    fn entry(contents: &str) -> Vec<u8> {
+        let mut entry = vec![contents.len() as u8];
+        entry.extend_from_slice(contents.as_bytes());
+        let crc = checksum(&entry);
+        entry.extend_from_slice(&crc.to_le_bytes());
+        entry
+    }
+
+    #[test]
+    fn reads_entries_until_empty_flash() {
+        let mut data = entry("B2A4");
+        data.extend(entry("DAC8152"));
+        data.push(0xFF);
+        let entries: Vec<_> = BinKv::new(&data).collect();
+        assert_eq!(entries, [Ok("B2A4"), Ok("DAC8152")]);
+    }
+
+    #[test]
+    fn stops_after_a_checksum_mismatch() {
+        let mut data = entry("DAC8152");
+        *data.last_mut().unwrap() ^= 0xFF;
+        data.extend(entry("B2A4"));
+        let entries: Vec<_> = BinKv::new(&data).collect();
+        assert_eq!(entries, [Err("calibration entry checksum mismatch")]);
+    }
+
+    #[test]
+    fn stops_at_truncated_data() {
+        let data = entry("DAC8152");
+        let entries: Vec<_> = BinKv::new(&data[..data.len() - 1]).collect();
+        assert_eq!(entries, [Err("calibration data is truncated")]);
+    }
 }
