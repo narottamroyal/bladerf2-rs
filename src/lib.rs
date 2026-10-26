@@ -12,8 +12,9 @@
 //!   runtime required), or
 //! * `.await` it from async code.
 //!
-//! On native targets, `.await` needs one of the `smol` or `tokio` cargo
-//! features so that nusb can run blocking USB calls on a runtime. On
+//! On native targets, enable the `smol` or `tokio` cargo feature when using
+//! `.await`, so that nusb runs its blocking USB calls on that runtime. Without
+//! one, those calls block the thread running the task. On
 //! `wasm32-unknown-unknown` nothing extra is needed: all I/O goes through
 //! WebUSB and only the async API is available.
 //!
@@ -69,8 +70,9 @@
 //! Sample streams ([`RxStream`], [`TxStream`]) are created from a session but
 //! own everything they need, so they stay valid after the session is dropped
 //! and can be moved to another thread or task. Always call `deactivate` when
-//! finished: dropping an active stream only deactivates it on a best-effort
-//! basis (on wasm, asynchronously).
+//! finished: dropping an active stream stops it on native targets, but in the
+//! browser it keeps running until the next stream in that direction is
+//! activated, or the device is opened again.
 //!
 //! # Examples
 //!

@@ -65,14 +65,12 @@ impl RfLinkSession<'_> {
 
     /// Supported frequency range for a direction, in Hz.
     pub fn frequency_range(&self, direction: Direction) -> RangeInclusive<u64> {
-        drivers::rfic::get_frequency_range(direction)
+        drivers::rfic::frequency_range(direction)
     }
 
     /// Current frequency for a direction, in Hz.
     pub fn frequency(&self, direction: Direction) -> impl MaybeFuture<Output = Result<u64>> {
-        maybe_future::operation(
-            async move { drivers::rfic::get_frequency(self.nios, direction).await },
-        )
+        maybe_future::operation(drivers::rfic::frequency(self.nios, direction))
     }
 
     /// Set the frequency for a direction, in Hz.
@@ -81,42 +79,38 @@ impl RfLinkSession<'_> {
         direction: Direction,
         frequency: u64,
     ) -> impl MaybeFuture<Output = Result<()>> {
-        maybe_future::operation(async move {
-            drivers::rfic::set_frequency(self.nios, direction, frequency).await
-        })
+        maybe_future::operation(drivers::rfic::set_frequency(
+            self.nios, direction, frequency,
+        ))
     }
 
     // ==================== Sample rate ====================
 
     /// Supported sample rate range, in Hz.
     pub fn sample_rate_range(&self) -> RangeInclusive<u64> {
-        drivers::rfic::get_sample_rate_range()
+        drivers::rfic::sample_rate_range()
     }
 
     /// Current sample rate, in Hz.
     pub fn sample_rate(&self) -> impl MaybeFuture<Output = Result<u64>> {
-        maybe_future::operation(async move { drivers::rfic::get_sample_rate(self.nios).await })
+        maybe_future::operation(drivers::rfic::sample_rate(self.nios))
     }
 
     /// Set the sample rate, in Hz.
     pub fn set_sample_rate(&self, rate: u64) -> impl MaybeFuture<Output = Result<()>> {
-        maybe_future::operation(
-            async move { drivers::rfic::set_sample_rate(self.nios, rate).await },
-        )
+        maybe_future::operation(drivers::rfic::set_sample_rate(self.nios, rate))
     }
 
     // ==================== Bandwidth ====================
 
     /// Supported bandwidth range, in Hz.
     pub fn bandwidth_range(&self) -> RangeInclusive<u64> {
-        drivers::rfic::get_bandwidth_range()
+        drivers::rfic::bandwidth_range()
     }
 
     /// Current bandwidth for a direction, in Hz.
     pub fn bandwidth(&self, direction: Direction) -> impl MaybeFuture<Output = Result<u64>> {
-        maybe_future::operation(
-            async move { drivers::rfic::get_bandwidth(self.nios, direction).await },
-        )
+        maybe_future::operation(drivers::rfic::bandwidth(self.nios, direction))
     }
 
     /// Set the bandwidth for a direction, in Hz.
@@ -125,9 +119,9 @@ impl RfLinkSession<'_> {
         direction: Direction,
         bandwidth: u64,
     ) -> impl MaybeFuture<Output = Result<()>> {
-        maybe_future::operation(async move {
-            drivers::rfic::set_bandwidth(self.nios, direction, bandwidth).await
-        })
+        maybe_future::operation(drivers::rfic::set_bandwidth(
+            self.nios, direction, bandwidth,
+        ))
     }
 
     // ==================== Gain ====================
@@ -137,14 +131,12 @@ impl RfLinkSession<'_> {
         &self,
         direction: Direction,
     ) -> impl MaybeFuture<Output = Result<&'static GainRange>> {
-        maybe_future::operation(
-            async move { drivers::rfic::gain_range(self.nios, direction).await },
-        )
+        maybe_future::operation(drivers::rfic::gain_range(self.nios, direction))
     }
 
     /// Current gain for a channel, in dB.
     pub fn gain(&self, channel: Channel) -> impl MaybeFuture<Output = Result<f64>> {
-        maybe_future::operation(async move { drivers::rfic::get_gain(self.nios, channel).await })
+        maybe_future::operation(drivers::rfic::gain(self.nios, channel))
     }
 
     /// Set the gain for a channel, in dB.
@@ -156,16 +148,12 @@ impl RfLinkSession<'_> {
     /// RX stream is never toggled, so setting the gain of the *other* RX
     /// channel while one is streaming only takes effect once it starts.
     pub fn set_gain(&self, channel: Channel, gain: f64) -> impl MaybeFuture<Output = Result<()>> {
-        maybe_future::operation(
-            async move { drivers::rfic::set_gain(self.nios, channel, gain).await },
-        )
+        maybe_future::operation(drivers::rfic::set_gain(self.nios, channel, gain))
     }
 
     /// Current AGC mode for an RX channel.
     pub fn gain_mode(&self, channel: Channel) -> impl MaybeFuture<Output = Result<GainMode>> {
-        maybe_future::operation(
-            async move { drivers::rfic::get_gain_mode(self.nios, channel).await },
-        )
+        maybe_future::operation(drivers::rfic::gain_mode(self.nios, channel))
     }
 
     /// Set the AGC mode for an RX channel.
@@ -174,16 +162,14 @@ impl RfLinkSession<'_> {
         channel: Channel,
         mode: GainMode,
     ) -> impl MaybeFuture<Output = Result<()>> {
-        maybe_future::operation(async move {
-            drivers::rfic::set_gain_mode(self.nios, channel, mode).await
-        })
+        maybe_future::operation(drivers::rfic::set_gain_mode(self.nios, channel, mode))
     }
 
     // ==================== Bias tee ====================
 
     /// Whether the bias tee is supplying DC power on a direction's antenna port.
     pub fn bias_tee(&self, direction: Direction) -> impl MaybeFuture<Output = Result<bool>> {
-        maybe_future::operation(async move { drivers::rffe::bias_tee(self.nios, direction).await })
+        maybe_future::operation(drivers::rffe::bias_tee(self.nios, direction))
     }
 
     /// Turn the bias tee on or off for a direction. While on, it supplies DC
@@ -193,9 +179,7 @@ impl RfLinkSession<'_> {
         direction: Direction,
         enable: bool,
     ) -> impl MaybeFuture<Output = Result<()>> {
-        maybe_future::operation(async move {
-            drivers::rffe::set_bias_tee(self.nios, direction, enable).await
-        })
+        maybe_future::operation(drivers::rffe::set_bias_tee(self.nios, direction, enable))
     }
 
     // ==================== RX source ====================
@@ -224,7 +208,7 @@ impl RfLinkSession<'_> {
     /// this can differ slightly from the value given to
     /// [`set_pll_refclk`](Self::set_pll_refclk).
     pub fn pll_refclk(&self) -> impl MaybeFuture<Output = Result<u64>> {
-        maybe_future::operation(async move { drivers::adf4002::refclk(self.nios).await })
+        maybe_future::operation(drivers::adf4002::refclk(self.nios))
     }
 
     /// Set the PLL reference frequency, in Hz.
@@ -232,29 +216,25 @@ impl RfLinkSession<'_> {
     /// Fails with [`Error::OutOfRange`](crate::Error::OutOfRange) outside
     /// [`pll_refclk_range`](Self::pll_refclk_range).
     pub fn set_pll_refclk(&self, ref_hz: u64) -> impl MaybeFuture<Output = Result<()>> {
-        maybe_future::operation(async move {
-            drivers::adf4002::set_refclk(self.nios, self.dac, ref_hz).await
-        })
+        maybe_future::operation(drivers::adf4002::set_refclk(self.nios, self.dac, ref_hz))
     }
 
     /// Whether the PLL is locking the on-board VCTCXO to the reference on
     /// REFIN (J95).
     pub fn pll_enable(&self) -> impl MaybeFuture<Output = Result<bool>> {
-        maybe_future::operation(async move { drivers::adf4002::enabled(self.nios).await })
+        maybe_future::operation(drivers::adf4002::enabled(self.nios))
     }
 
     /// Turn the PLL on or off. While on, it locks the on-board VCTCXO to the
     /// reference on REFIN (J95) and the VCTCXO DAC is released; turning it off
     /// restores the DAC.
     pub fn set_pll_enable(&self, enable: bool) -> impl MaybeFuture<Output = Result<()>> {
-        maybe_future::operation(async move {
-            drivers::adf4002::set_enabled(self.nios, self.dac, enable).await
-        })
+        maybe_future::operation(drivers::adf4002::set_enabled(self.nios, self.dac, enable))
     }
 
     /// Whether the PLL reports lock to the reference on REFIN.
     pub fn pll_lock_state(&self) -> impl MaybeFuture<Output = Result<bool>> {
-        maybe_future::operation(async move { drivers::rffe::pll_lock_state(self.nios).await })
+        maybe_future::operation(drivers::rffe::pll_lock_state(self.nios))
     }
 
     // ==================== Diagnostics ====================
@@ -264,14 +244,12 @@ impl RfLinkSession<'_> {
     /// In testing this has read 0 even while streaming, so it is not yet
     /// known to be a usable clock with this driver.
     pub fn timestamp(&self) -> impl MaybeFuture<Output = Result<u64>> {
-        maybe_future::operation(async move { self.nios.read(Nios8x64::Timestamp, 0).await })
+        maybe_future::operation(self.nios.read(Nios8x64::Timestamp, 0))
     }
 
     /// Disable RX IQ correction and DC tracking loops.
     pub fn disable_tracking_control(&self) -> impl MaybeFuture<Output = Result<()>> {
-        maybe_future::operation(async move {
-            drivers::ad9361::disable_tracking_control(self.nios).await
-        })
+        maybe_future::operation(drivers::ad9361::disable_tracking_control(self.nios))
     }
 
     // ==================== Streaming ====================

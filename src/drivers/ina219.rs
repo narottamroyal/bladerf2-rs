@@ -31,21 +31,18 @@ const RESET: u16 = 0x8000;
 /// Initialize the INA219: soft-reset, configure, and program the calibration
 /// register (required for current/power conversion).
 pub(crate) async fn init(nios: &NiosCore) -> Result<()> {
-    // Soft-reset the INA219
+    // Soft-reset the INA219 and wait for it to finish. Continuing otherwise
+    // would leave the writes below landing on an unresponsive chip.
     nios.write(Nios8x16::Ina219, Address::Config.into(), RESET)
         .await?;
-    for _ in 0..1000 {
-        if nios.read(Nios8x16::Ina219, Address::Config.into()).await? & RESET == 0 {
-            break;
+    let mut attempts = 0;
+    while nios.read(Nios8x16::Ina219, Address::Config.into()).await? & RESET != 0 {
+        attempts += 1;
+        if attempts == 1000 {
+            tracing::warn!("INA219 did not complete soft reset");
+            return Err(Error::Timeout);
         }
         maybe_future::sleep(std::time::Duration::from_millis(1)).await;
-    }
-
-    // Verify the reset completed; continuing would leave the calibration
-    // write below landing on an unresponsive chip.
-    if nios.read(Nios8x16::Ina219, Address::Config.into()).await? & RESET != 0 {
-        tracing::warn!("INA219 did not complete soft reset");
-        return Err(Error::Timeout);
     }
 
     // Initialize the config register

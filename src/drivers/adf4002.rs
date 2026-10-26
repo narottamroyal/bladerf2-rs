@@ -58,7 +58,7 @@ async fn write_enable_bit(nios: &NiosCore, enable: bool) -> Result<()> {
 ///
 /// The PLL is enabled while the dividers are written and restored afterwards.
 pub(crate) async fn set_refclk(nios: &NiosCore, dac: &Ad5621, ref_hz: u64) -> Result<()> {
-    let (r, n) = calculate_pll_ratio(ref_hz, VCTCXO_HZ)?;
+    let (r, n) = calculate_pll_ratio(ref_hz)?;
 
     let was_enabled = enabled(nios).await?;
     if !was_enabled {
@@ -87,9 +87,9 @@ pub(crate) async fn refclk(nios: &NiosCore) -> Result<u64> {
     Ok(r * VCTCXO_HZ / n)
 }
 
-/// Calculate the PLL R and N dividers by brute-force search, biased towards
-/// smaller dividers (first fit) for better PLL stability.
-fn calculate_pll_ratio(ref_hz: u64, clock_hz: u64) -> Result<(u16, u16)> {
+/// Calculate the PLL R and N dividers for the VCTCXO by brute-force search,
+/// biased towards smaller dividers (first fit) for better PLL stability.
+fn calculate_pll_ratio(ref_hz: u64) -> Result<(u16, u16)> {
     const R_MAX: u16 = 16383;
     const N_MAX: u16 = 8191;
     const TOLERANCE: f64 = 0.00001;
@@ -97,11 +97,8 @@ fn calculate_pll_ratio(ref_hz: u64, clock_hz: u64) -> Result<(u16, u16)> {
     if !REFCLK_RANGE.contains(&ref_hz) {
         return Err(Error::OutOfRange);
     }
-    if !(5_000_000..=400_000_000).contains(&clock_hz) {
-        return Err(Error::OutOfRange);
-    }
 
-    let target = clock_hz as f64 / ref_hz as f64;
+    let target = VCTCXO_HZ as f64 / ref_hz as f64;
 
     for r in 1..=R_MAX {
         let n = (target * r as f64).round();

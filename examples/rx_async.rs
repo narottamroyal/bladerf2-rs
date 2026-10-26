@@ -7,8 +7,8 @@
 //! `rx_sync`, `rx_async` and `rx_web` are intentionally near-identical; only
 //! how the device is opened and how operations are waited on differ.
 //!
-//! ```console
-//! $ cargo run --release --features smol --example rx_async
+//! ```sh
+//! cargo run --release --features smol --example rx_async
 //! ```
 
 use bladerf2::{BladeRf2, Channel, Direction, GainMode};

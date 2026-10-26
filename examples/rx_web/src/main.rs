@@ -8,10 +8,10 @@
 //! `rx_sync`, `rx_async` and `rx_web` are intentionally near-identical; only
 //! how the device is opened and how operations are waited on differ.
 //!
-//! ```console
-//! $ cargo install trunk   # once
-//! $ cd examples/rx_web
-//! $ trunk serve --open
+//! ```sh
+//! cargo install trunk   # once
+//! cd examples/rx_web
+//! trunk serve --open
 //! ```
 //!
 //! Use a Chromium-based browser (Chrome, Edge, ...), which supports WebUSB.
@@ -182,7 +182,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             10.0 * power.log10()
         );
     }
-    // Always deactivate explicitly; dropping an active stream is best-effort only.
+    // Always deactivate explicitly: in the browser, dropping an active stream
+    // does not stop it.
     rx.deactivate().await?;
     out!("done");
     Ok(())

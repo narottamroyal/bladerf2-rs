@@ -61,8 +61,8 @@ pub(crate) use native::is_blocking;
 /// to the blocking or async path.
 ///
 /// nusb's `.await` on operations backed by blocking syscalls **panics** when
-/// neither the `tokio` nor the `smol` feature is enabled, so outside a
-/// `.wait()` context those features are required to take the async path.
+/// neither the `tokio` nor the `smol` feature is enabled, so without one of
+/// them the operation blocks instead, even outside a `.wait()` context.
 pub(crate) async fn usb<M: MaybeFuture>(op: M) -> M::Output {
     #[cfg(not(target_arch = "wasm32"))]
     if is_blocking() || !cfg!(any(feature = "smol", feature = "tokio")) {
@@ -115,6 +115,8 @@ mod native {
 
     thread_local! {
         static BLOCKING: Cell<bool> = const { Cell::new(false) };
+        /// Wakes this thread when a future it is blocked on can make progress.
+        static WAKER: Waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
     }
 
     /// Returns `true` while the current thread is inside a `.wait()` call.
@@ -151,7 +153,7 @@ mod native {
         timeout: Option<Duration>,
     ) -> Option<F::Output> {
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
-        let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
+        let waker = WAKER.with(Waker::clone);
         let mut cx = Context::from_waker(&waker);
         let mut future = std::pin::pin!(future);
 

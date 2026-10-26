@@ -32,18 +32,11 @@ enum Command {
 // ==================== Initialization ====================
 
 #[repr(u64)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
-    #[default]
     Off = 0,
     On = 1,
     Standby = 2,
-}
-
-impl From<State> for u64 {
-    fn from(state: State) -> u64 {
-        state as u64
-    }
 }
 
 impl TryFrom<u64> for State {
@@ -51,23 +44,23 @@ impl TryFrom<u64> for State {
 
     fn try_from(value: u64) -> Result<Self> {
         match value {
-            x if x == State::Off.into() => Ok(State::Off),
-            x if x == State::On.into() => Ok(State::On),
-            x if x == State::Standby.into() => Ok(State::Standby),
+            0 => Ok(Self::Off),
+            1 => Ok(Self::On),
+            2 => Ok(Self::Standby),
             _ => Err(Error::ValueConversion),
         }
     }
 }
 
-async fn get_state(nios: &NiosCore) -> Result<State> {
+async fn state(nios: &NiosCore) -> Result<State> {
     read(nios, CHANNEL_ALL, Command::Init).await?.try_into()
 }
 
 /// Put the RFIC into the "On" state if it is off or in standby.
 pub(crate) async fn init(nios: &NiosCore) -> Result<()> {
-    match get_state(nios).await? {
+    match state(nios).await? {
         State::Off | State::Standby => {
-            write(nios, CHANNEL_ALL, Command::Init, State::On.into()).await
+            write(nios, CHANNEL_ALL, Command::Init, State::On as u64).await
         }
         State::On => Ok(()),
     }
@@ -76,12 +69,12 @@ pub(crate) async fn init(nios: &NiosCore) -> Result<()> {
 // ==================== Bandwidth ====================
 
 /// Supported bandwidth range in Hz.
-pub(crate) fn get_bandwidth_range() -> RangeInclusive<u64> {
+pub(crate) fn bandwidth_range() -> RangeInclusive<u64> {
     200_000..=56_000_000
 }
 
 /// Current bandwidth for a direction, in Hz.
-pub(crate) async fn get_bandwidth(nios: &NiosCore, direction: Direction) -> Result<u64> {
+pub(crate) async fn bandwidth(nios: &NiosCore, direction: Direction) -> Result<u64> {
     read(nios, direction, Command::Bandwidth).await
 }
 
@@ -91,7 +84,7 @@ pub(crate) async fn set_bandwidth(
     direction: Direction,
     bandwidth: u64,
 ) -> Result<()> {
-    if !get_bandwidth_range().contains(&bandwidth) {
+    if !bandwidth_range().contains(&bandwidth) {
         return Err(Error::OutOfRange);
     }
     write(nios, direction, Command::Bandwidth, bandwidth).await
@@ -100,7 +93,7 @@ pub(crate) async fn set_bandwidth(
 // ==================== Frequency ====================
 
 /// Supported frequency range for a direction, in Hz.
-pub(crate) fn get_frequency_range(direction: Direction) -> RangeInclusive<u64> {
+pub(crate) fn frequency_range(direction: Direction) -> RangeInclusive<u64> {
     match direction {
         Direction::Rx => 70_000_000..=6_000_000_000,
         Direction::Tx => 47_000_000..=6_000_000_000,
@@ -108,7 +101,7 @@ pub(crate) fn get_frequency_range(direction: Direction) -> RangeInclusive<u64> {
 }
 
 /// Current frequency for a direction, in Hz.
-pub(crate) async fn get_frequency(nios: &NiosCore, direction: Direction) -> Result<u64> {
+pub(crate) async fn frequency(nios: &NiosCore, direction: Direction) -> Result<u64> {
     read(nios, direction, Command::Frequency).await
 }
 
@@ -118,7 +111,7 @@ pub(crate) async fn set_frequency(
     direction: Direction,
     frequency: u64,
 ) -> Result<()> {
-    if !get_frequency_range(direction).contains(&frequency) {
+    if !frequency_range(direction).contains(&frequency) {
         return Err(Error::OutOfRange);
     }
     write(nios, direction, Command::Frequency, frequency).await
@@ -166,7 +159,7 @@ pub(crate) async fn gain_range(
     nios: &NiosCore,
     direction: Direction,
 ) -> Result<&'static GainRange> {
-    let frequency = get_frequency(nios, direction).await?;
+    let frequency = frequency(nios, direction).await?;
     let range = match direction {
         Direction::Rx => RX_RANGES
             .iter()
@@ -178,7 +171,7 @@ pub(crate) async fn gain_range(
 }
 
 /// Current gain for a channel, in dB.
-pub(crate) async fn get_gain(nios: &NiosCore, channel: Channel) -> Result<f64> {
+pub(crate) async fn gain(nios: &NiosCore, channel: Channel) -> Result<f64> {
     let mut gain = read(nios, channel, Command::Gain).await? as f64;
     if channel.direction() == Direction::Tx {
         // TX gain register is in millidecibels with an inverted sign
@@ -201,9 +194,7 @@ pub(crate) async fn set_gain(nios: &NiosCore, channel: Channel, mut gain: f64) -
     }
 
     // RX gain writes require manual gain mode
-    if channel.direction() == Direction::Rx
-        && get_gain_mode(nios, channel).await? != GainMode::Manual
-    {
+    if channel.direction() == Direction::Rx && gain_mode(nios, channel).await? != GainMode::Manual {
         set_gain_mode(nios, channel, GainMode::Manual).await?;
     }
 
@@ -219,7 +210,7 @@ pub(crate) async fn set_gain(nios: &NiosCore, channel: Channel, mut gain: f64) -
 /// immediately.
 ///
 /// The RFIC only applies a new RX gain while an RX channel is enabled; with
-/// every RX channel off, [`get_gain`] would keep returning the previous value
+/// every RX channel off, [`gain`] would keep returning the previous value
 /// until the next stream starts. Briefly enabling and disabling an RX channel
 /// makes the firmware apply it.
 ///
@@ -274,7 +265,7 @@ impl TryFrom<u64> for GainMode {
 }
 
 /// Current AGC mode for an RX channel.
-pub(crate) async fn get_gain_mode(nios: &NiosCore, channel: Channel) -> Result<GainMode> {
+pub(crate) async fn gain_mode(nios: &NiosCore, channel: Channel) -> Result<GainMode> {
     match channel.direction() {
         Direction::Rx => read(nios, channel, Command::GainMode).await?.try_into(),
         Direction::Tx => Err(Error::OutOfRange),
@@ -292,12 +283,12 @@ pub(crate) async fn set_gain_mode(nios: &NiosCore, channel: Channel, mode: GainM
 // ==================== Sample rate ====================
 
 /// Supported sample rate range in Hz.
-pub(crate) fn get_sample_rate_range() -> RangeInclusive<u64> {
+pub(crate) fn sample_rate_range() -> RangeInclusive<u64> {
     520_834..=61_440_000
 }
 
 /// Current sample rate in Hz (all channels share one rate).
-pub(crate) async fn get_sample_rate(nios: &NiosCore) -> Result<u64> {
+pub(crate) async fn sample_rate(nios: &NiosCore) -> Result<u64> {
     read(nios, Channel::Rx0, Command::SampleRate).await
 }
 
@@ -306,20 +297,20 @@ pub(crate) async fn get_sample_rate(nios: &NiosCore) -> Result<u64> {
 /// Crossing between the low-rate and high-rate regimes goes through an
 /// intermediate safe rate, and the RX 4x decimation / TX interpolation filters
 /// are configured to match.
-pub(crate) async fn set_sample_rate(nios: &NiosCore, sample_rate: u64) -> Result<()> {
+pub(crate) async fn set_sample_rate(nios: &NiosCore, rate: u64) -> Result<()> {
     const LOW_RATE_THRESHOLD: u64 = 2_083_334;
     const HIGH_RATE_THRESHOLD: u64 = 40_000_000;
     const INTERMEDIATE_SAFE_RATE: u64 = 30_000_000;
 
-    if !get_sample_rate_range().contains(&sample_rate) {
+    if !sample_rate_range().contains(&rate) {
         return Err(Error::OutOfRange);
     }
 
     // Work around a limitation that prevents direct changes between high and
     // low sample rates
-    let current = get_sample_rate(nios).await?;
-    if (current > HIGH_RATE_THRESHOLD && sample_rate < LOW_RATE_THRESHOLD)
-        || (sample_rate > HIGH_RATE_THRESHOLD && current < LOW_RATE_THRESHOLD)
+    let current = sample_rate(nios).await?;
+    if (current > HIGH_RATE_THRESHOLD && rate < LOW_RATE_THRESHOLD)
+        || (rate > HIGH_RATE_THRESHOLD && current < LOW_RATE_THRESHOLD)
     {
         write(
             nios,
@@ -331,7 +322,7 @@ pub(crate) async fn set_sample_rate(nios: &NiosCore, sample_rate: u64) -> Result
     }
 
     // 4x RX decimation / TX interpolation is required for low sample rates
-    let (rx_mode, tx_mode) = if sample_rate <= LOW_RATE_THRESHOLD {
+    let (rx_mode, tx_mode) = if rate <= LOW_RATE_THRESHOLD {
         (FilterMode::Ratio4, FilterMode::Ratio4)
     } else {
         (FilterMode::Ratio1, FilterMode::Bypass)
@@ -351,7 +342,7 @@ pub(crate) async fn set_sample_rate(nios: &NiosCore, sample_rate: u64) -> Result
         return Err(error);
     }
 
-    write(nios, Channel::Rx0, Command::SampleRate, sample_rate).await
+    write(nios, Channel::Rx0, Command::SampleRate, rate).await
 }
 
 // ==================== Filters ====================
@@ -387,12 +378,12 @@ impl TryFrom<u64> for FilterMode {
     }
 }
 
-async fn get_filter(nios: &NiosCore, direction: Direction) -> Result<FilterMode> {
+async fn filter(nios: &NiosCore, direction: Direction) -> Result<FilterMode> {
     read(nios, direction, Command::Filter).await?.try_into()
 }
 
 async fn set_filter(nios: &NiosCore, direction: Direction, mode: FilterMode) -> Result<()> {
-    if get_filter(nios, direction).await? == mode {
+    if filter(nios, direction).await? == mode {
         return Ok(());
     }
     write(nios, direction, Command::Filter, mode.into()).await
@@ -400,17 +391,10 @@ async fn set_filter(nios: &NiosCore, direction: Direction, mode: FilterMode) -> 
 
 // ==================== Channel enable ====================
 
-async fn set_tx_mute(nios: &NiosCore, channel: Channel, mute: bool) -> Result<()> {
-    match channel.direction() {
-        Direction::Tx => write(nios, channel, Command::TxMute, mute.into()).await,
-        Direction::Rx => Err(Error::OutOfRange),
-    }
-}
-
-/// Enable or disable a channel module (mutes TX while disabled).
+/// Enable or disable a channel module, muting TX channels while disabled.
 pub(crate) async fn enable_module(nios: &NiosCore, channel: Channel, enable: bool) -> Result<()> {
     if channel.direction() == Direction::Tx {
-        set_tx_mute(nios, channel, !enable).await?;
+        write(nios, channel, Command::TxMute, (!enable).into()).await?;
     }
     write(nios, channel, Command::Enable, enable.into()).await
 }

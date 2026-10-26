@@ -51,8 +51,9 @@ let rf = dev.rf_link_session();
 rf.set_frequency(Direction::Rx, 100_000_000).await?;
 ```
 
-On native targets, `.await` needs the `smol` or `tokio` feature so that `nusb` can
-run blocking USB calls on a runtime. The blocking API and the browser need neither.
+On native targets, enable the `smol` or `tokio` feature when using `.await`, so that
+`nusb` runs its blocking USB calls on that runtime. Without one, those calls block the
+thread running the task. The blocking API and the browser need neither feature.
 
 ### In the browser
 

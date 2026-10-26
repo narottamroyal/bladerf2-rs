@@ -12,7 +12,7 @@ use crate::drivers::rfic;
 use crate::error::{Error, Result};
 use crate::maybe_future::{self, with_timeout};
 use crate::nios::NiosCore;
-use crate::usb::{self, Endpoint as EndpointAddress, UsbTransport};
+use crate::usb::{self, EndpointAddress, UsbTransport};
 use num_complex::Complex32;
 use nusb::MaybeFuture;
 use nusb::transfer::{Buffer, Bulk, EndpointDirection, In, Out, TransferError};
