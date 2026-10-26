@@ -1,2 +1,7 @@
 [target.wasm32-unknown-unknown]
 rustflags = ["--cfg=web_sys_unstable_apis"]
+runner = "wasm-bindgen-test-runner"
+
+[env]
+WASM_BINDGEN_TEST_ADDRESS = "127.0.0.1:8123"
+WASM_BINDGEN_TEST_WEBDRIVER_JSON = { value = "tests/webdriver.json", relative = true }

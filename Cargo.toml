@@ -27,12 +27,13 @@ num-complex = { version = "0.4", features = ["bytemuck"] }
 thiserror = "2"
 tracing = "0.1"
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen-futures = "0.4"
-
 [dev-dependencies]
 approx = { version = "0.5", features = ["num-complex"] }
-serial_test = "3"
+web-time = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+async-lock = "3"
+wasm-bindgen-test = "0.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 smol = "2"

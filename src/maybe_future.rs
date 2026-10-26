@@ -53,7 +53,9 @@ impl<F: Future + NonWasmSend> MaybeFuture for Operation<F> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use native::{block_on, is_blocking};
+pub use native::block_on;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use native::is_blocking;
 
 /// Dispatch a nusb `MaybeFuture` (control transfer, `set_alt_setting`, ...)
 /// to the blocking or async path.
@@ -139,7 +141,7 @@ mod native {
 
     /// Run a future to completion on the current thread, parking while it is
     /// pending.
-    pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
+    pub fn block_on<F: Future>(future: F) -> F::Output {
         block_on_until(future, None).expect("block_on without a deadline always completes")
     }
 
