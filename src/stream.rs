@@ -15,13 +15,15 @@ use crate::nios::NiosCore;
 use crate::usb::{self, Endpoint as EndpointAddress, UsbTransport};
 use num_complex::Complex32;
 use nusb::MaybeFuture;
-use nusb::transfer::{Buffer, Bulk, In, Out};
+use nusb::transfer::{Buffer, Bulk, EndpointDirection, In, Out, TransferError};
 use std::time::Duration;
 
 /// Requested size of each USB bulk transfer, in bytes.
 const TRANSFER_SIZE: usize = 8192;
 /// Maximum transfers queued with the OS to keep the pipe full.
 const MAX_PENDING: usize = 4;
+/// Longest `deactivate` waits for queued transfers before stopping the radio.
+const COLLECT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Q11 full-scale: samples span `[-2048, 2047]`.
 const Q11_SCALE: f32 = 2048.0;
@@ -111,6 +113,50 @@ fn teardown(transport: UsbTransport, nios: NiosCore, channels: Vec<Channel>, dir
     wasm_bindgen_futures::spawn_local(cleanup);
 }
 
+/// Waits for queued transfers on a bulk endpoint to finish. Cancelled
+/// transfers are expected. Fails if one takes longer than `COLLECT_TIMEOUT`.
+async fn drain<D: EndpointDirection>(endpoint: &mut nusb::Endpoint<Bulk, D>) -> Result<()> {
+    while endpoint.pending() > 0 {
+        let completion = with_timeout(
+            async {
+                Ok::<_, Error>(std::future::poll_fn(|cx| endpoint.poll_next_complete(cx)).await)
+            },
+            Some(COLLECT_TIMEOUT),
+        )
+        .await?;
+        match completion.status {
+            Ok(()) | Err(TransferError::Cancelled) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+/// Stops a stream and leaves its endpoint idle.
+///
+/// Native cancels queued transfers first: stopping with transfers queued
+/// times out at high sample rates. WebUSB cannot cancel, so its queue drains
+/// while the radio still runs.
+async fn stop_stream<D: EndpointDirection>(
+    endpoint: &mut nusb::Endpoint<Bulk, D>,
+    transport: &UsbTransport,
+    nios: &NiosCore,
+    channels: &[Channel],
+    direction: Direction,
+) -> Result<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    endpoint.cancel_all();
+    #[cfg(target_arch = "wasm32")]
+    drain(endpoint).await?;
+
+    set_path_enabled(nios, transport, channels, direction, false).await?;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    drain(endpoint).await?;
+    maybe_future::usb(endpoint.clear_halt()).await?;
+    Ok(())
+}
+
 // ==================== RxStream ====================
 
 /// Receive sample stream.
@@ -187,33 +233,16 @@ impl RxStream {
     /// yet read.
     pub fn deactivate(&mut self) -> impl MaybeFuture<Output = Result<()>> + '_ {
         maybe_future::operation(async move {
-            // Stop the radio first. Transfers still queued only complete when
-            // data arrives, and none will once the stream has stopped (for
-            // example in loopback with an idle TX), so waiting for them
-            // before this point could block forever.
-            let result = set_path_enabled(
-                &self.nios,
+            stop_stream(
+                &mut self.endpoint,
                 &self.transport,
+                &self.nios,
                 &self.channels,
                 Direction::Rx,
-                false,
             )
-            .await;
-
-            // Native: cancel the queued transfers and collect them so the
-            // endpoint is clean. WebUSB cannot cancel transfers, so they are
-            // left queued; they complete with fresh data after the next
-            // `activate`.
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                self.endpoint.cancel_all();
-                while self.endpoint.pending() > 0 {
-                    let _ = usb::next_in(&mut self.endpoint).await;
-                }
-            }
-
+            .await?;
             self.pending.clear();
-            result
+            Ok(())
         })
     }
 
@@ -236,11 +265,9 @@ impl RxStream {
         buffers: &mut [&mut [Complex32]],
         timeout: Option<Duration>,
     ) -> Result<usize> {
-        assert_eq!(
-            self.channels.len(),
-            buffers.len(),
-            "buffer count must match channel count"
-        );
+        if buffers.len() != self.channels.len() {
+            return Err(Error::ChannelConfig);
+        }
         match buffers.len() {
             1 => with_timeout(self.read_single(buffers[0]), timeout).await,
             2 => with_timeout(self.read_dual(buffers), timeout).await,
@@ -294,10 +321,6 @@ impl RxStream {
             self.endpoint.submit(Buffer::new(self.in_size));
         }
         let buffer = usb::next_in(&mut self.endpoint).await?;
-        if buffer.is_empty() {
-            // A zero-length packet mid-stream is unexpected.
-            return Err(Error::Timeout);
-        }
         extend_i16_le(&mut self.pending, &buffer);
         Ok(())
     }
@@ -305,6 +328,13 @@ impl RxStream {
 
 impl Drop for RxStream {
     fn drop(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.endpoint.cancel_all();
+            if let Err(error) = maybe_future::block_on(drain(&mut self.endpoint)) {
+                tracing::warn!(?error, "queued RX transfers did not drain");
+            }
+        }
         teardown(
             self.transport.clone(),
             self.nios.clone(),
@@ -381,19 +411,16 @@ impl TxStream {
         })
     }
 
-    /// Deactivate the stream, draining queued samples first so the tail of a
-    /// burst is not dropped.
+    /// Deactivate the stream. Samples that were written but not yet
+    /// transmitted are discarded, so the tail of a burst can be cut off.
     pub fn deactivate(&mut self) -> impl MaybeFuture<Output = Result<()>> + '_ {
         maybe_future::operation(async move {
-            while self.endpoint.pending() > 0 {
-                usb::next_out(&mut self.endpoint).await?;
-            }
-            set_path_enabled(
-                &self.nios,
+            stop_stream(
+                &mut self.endpoint,
                 &self.transport,
+                &self.nios,
                 &self.channels,
                 Direction::Tx,
-                false,
             )
             .await
         })
@@ -411,11 +438,9 @@ impl TxStream {
         buffers: &[&[Complex32]],
         timeout: Option<Duration>,
     ) -> Result<usize> {
-        assert_eq!(
-            self.channels.len(),
-            buffers.len(),
-            "buffer count must match channel count"
-        );
+        if buffers.len() != self.channels.len() {
+            return Err(Error::ChannelConfig);
+        }
         match buffers.len() {
             1 => with_timeout(self.write_single(buffers[0]), timeout).await,
             2 => with_timeout(self.write_dual(buffers), timeout).await,
@@ -424,12 +449,10 @@ impl TxStream {
     }
 
     async fn write_single(&mut self, buffer: &[Complex32]) -> Result<usize> {
-        let mut raw = vec![0i16; self.mtu() * 2];
-        let chunk = buffer.len();
-        c32_to_q11(buffer, &mut raw[..chunk * 2]);
-        self.write_raw(bytemuck::cast_slice(&raw[..chunk * 2]))
-            .await?;
-        Ok(chunk)
+        let mut raw = vec![0i16; buffer.len() * 2];
+        c32_to_q11(buffer, &mut raw);
+        self.write_raw(bytemuck::cast_slice(&raw)).await?;
+        Ok(buffer.len())
     }
 
     async fn write_dual(&mut self, buffers: &[&[Complex32]]) -> Result<usize> {
@@ -470,6 +493,13 @@ impl TxStream {
 
 impl Drop for TxStream {
     fn drop(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.endpoint.cancel_all();
+            if let Err(error) = maybe_future::block_on(drain(&mut self.endpoint)) {
+                tracing::warn!(?error, "queued TX transfers did not drain");
+            }
+        }
         teardown(
             self.transport.clone(),
             self.nios.clone(),

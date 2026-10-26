@@ -40,3 +40,6 @@ smol = "2"
 [[example]]
 name = "rx_async"
 required-features = ["smol"]
+
+[profile.test]
+opt-level = 3
