@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use approx::abs_diff_eq;
-use bladerf2::{BladeRf2, Channel, Direction, GainMode, RxStream, TxStream, Version};
+use bladerf2::{BladeRf2, Channel, Direction, GainMode, RxSource, RxStream, TxStream, Version};
 use futures_timer::Delay;
 use num_complex::Complex32;
 use web_time::Instant;
@@ -72,7 +72,7 @@ macro_rules! hardware_test {
     };
 }
 
-/// Opens the device, resets it (loopback off, 2 MS/s), and runs `test` on it.
+/// Opens the device, resets it (RX from the RFIC, 2 MS/s), and runs `test` on it.
 async fn with_device(test: impl AsyncFnOnce(&mut BladeRf2)) {
     let mut dev = match std::env::var("BLADERF2_SERIAL") {
         Ok(prefix) => BladeRf2::open_serial(&prefix).await,
@@ -81,7 +81,7 @@ async fn with_device(test: impl AsyncFnOnce(&mut BladeRf2)) {
     .expect("open bladeRF 2.0 micro");
     {
         let rf = dev.rf_link_session();
-        rf.set_loopback(false).await.unwrap();
+        rf.set_rx_source(RxSource::Rfic).await.unwrap();
         rf.set_sample_rate(2_000_000).await.unwrap();
     }
     test(&mut dev).await;
@@ -364,8 +364,8 @@ hardware_test! {
         let rf = dev.rf_link_session();
         rf.set_gain(Channel::Rx0, 0.0).await.unwrap();
 
-        rf.set_loopback(true).await.unwrap();
-        assert!(rf.loopback().await.unwrap());
+        rf.set_rx_source(RxSource::Loopback).await.unwrap();
+        assert_eq!(rf.rx_source().await.unwrap(), RxSource::Loopback);
 
         let mut rx = rf.rx_stream(&[0]).unwrap();
         let mut tx = rf.tx_stream(&[0]).unwrap();
@@ -386,20 +386,20 @@ hardware_test! {
             rx.deactivate().await.unwrap();
             tx.deactivate().await.unwrap();
         }
-        rf.set_loopback(false).await.unwrap();
-        assert!(!rf.loopback().await.unwrap());
+        rf.set_rx_source(RxSource::Rfic).await.unwrap();
+        assert_eq!(rf.rx_source().await.unwrap(), RxSource::Rfic);
     }
 }
 
 hardware_test! {
-    #[ignore = "known issue: in MIMO loopback the last 9 samples of every 1024-sample block are wrong"]
+    #[ignore = "FPGA 0.16.0 loses samples in MIMO digital loopback rx_counter covers MIMO RX"]
     fn mimo_loopback(dev) {
         let rf = dev.rf_link_session();
         rf.set_gain(Channel::Rx0, 0.0).await.unwrap();
         rf.set_gain(Channel::Rx1, 0.0).await.unwrap();
 
-        rf.set_loopback(true).await.unwrap();
-        assert!(rf.loopback().await.unwrap());
+        rf.set_rx_source(RxSource::Loopback).await.unwrap();
+        assert_eq!(rf.rx_source().await.unwrap(), RxSource::Loopback);
 
         let mut rx = rf.rx_stream(&[0, 1]).unwrap();
         let mut tx = rf.tx_stream(&[0, 1]).unwrap();
@@ -433,8 +433,44 @@ hardware_test! {
 
         rx.deactivate().await.unwrap();
         tx.deactivate().await.unwrap();
-        rf.set_loopback(false).await.unwrap();
-        assert!(!rf.loopback().await.unwrap());
+        rf.set_rx_source(RxSource::Rfic).await.unwrap();
+        assert_eq!(rf.rx_source().await.unwrap(), RxSource::Rfic);
+    }
+}
+
+hardware_test! {
+    fn rx_counter(dev) {
+        // The FPGA's test counter checks the whole RX path, including splitting
+        // two channels, which MIMO loopback cannot (see `mimo_loopback`).
+        let rf = dev.rf_link_session();
+        rf.set_rx_source(RxSource::Counter).await.unwrap();
+        assert_eq!(rf.rx_source().await.unwrap(), RxSource::Counter);
+
+        for channels in [&[0][..], &[1], &[0, 1]] {
+            let mut rx = rf.rx_stream(channels).unwrap();
+            rx.activate().await.unwrap();
+            let n = rx.mtu();
+            let mut buffers = vec![vec![Complex32::ZERO; n]; channels.len()];
+            // The counter restarts at 256 whenever RX is enabled.
+            let mut expected = 256;
+            for _ in 0..16 {
+                let mut refs: Vec<_> = buffers.iter_mut().map(Vec::as_mut_slice).collect();
+                assert_eq!(rx.read(&mut refs, TIMEOUT).await.unwrap(), n);
+                for i in 0..n {
+                    let sample = buffers[0][i];
+                    let value = (sample.re * 2048.0).round() as i32;
+                    assert_eq!(value, expected, "channels {channels:?}, sample {i}");
+                    assert_eq!((sample.im * 2048.0).round() as i32, -value);
+                    for buffer in &buffers[1..] {
+                        assert_eq!(buffer[i], sample, "channels differ at sample {i}");
+                    }
+                    expected = if value == 2047 { -2047 } else { value + 1 };
+                }
+            }
+            rx.deactivate().await.unwrap();
+        }
+
+        rf.set_rx_source(RxSource::Rfic).await.unwrap();
     }
 }
 
