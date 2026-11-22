@@ -358,6 +358,42 @@ hardware_test! {
 }
 
 hardware_test! {
+    fn sample_rate_round_trips_through_the_low_range(dev) {
+        let rf = dev.rf_link_session();
+
+        // Leaving the 2.08 MS/s low-rate range must leave the RFIC able to
+        // enter it again, and the stream must run at the rate that was asked.
+        for sequence in [
+            &[2_000_000, 4_000_000, 2_000_000][..],
+            &[2_000_000, 1_000_000, 4_000_000, 2_000_000],
+            &[2_000_000, 8_000_000, 2_000_000],
+        ] {
+            for &rate in sequence {
+                rf.set_sample_rate(rate).await.unwrap();
+                rf.set_bandwidth(Direction::Rx, rate).await.unwrap();
+                rf.set_bandwidth(Direction::Tx, rate).await.unwrap();
+            }
+            let last = *sequence.last().unwrap();
+            let actual = rf.sample_rate().await.unwrap();
+            assert!(actual.abs_diff(last) <= 1, "{sequence:?}: read back {actual} Hz");
+
+            let mut rx = rf.rx_stream(&[0]).unwrap();
+            rx.activate().await.unwrap();
+            let mut buf = vec![Complex32::ZERO; rx.mtu()];
+            let measured = measure_throughput(async || {
+                rx.read(&mut [buf.as_mut_slice()], TIMEOUT).await.unwrap()
+            })
+            .await;
+            rx.deactivate().await.unwrap();
+            assert!(
+                (measured / last as f64 - 1.0).abs() <= 0.005,
+                "{sequence:?}: streamed {measured:.0} S/s"
+            );
+        }
+    }
+}
+
+hardware_test! {
     fn throughput(dev) {
         let rf = dev.rf_link_session();
 

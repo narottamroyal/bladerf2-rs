@@ -83,7 +83,9 @@ each setting and reads it back, and receives a few buffers of samples.
   `SUBSYSTEM=="usb", ATTRS{idVendor}=="2cf0", ATTRS{idProduct}=="5250", MODE="0666"`.
   On Windows, the device needs a WinUSB driver, which you can install with Zadig.
 - **Sample rate.** The radio powers up at 30.72 MS/s. Set a rate you can sustain
-  before streaming.
+  before streaming. The RFIC can refuse a command; the call then fails with
+  `Error::RficCommandFailed`. Crossing 2.083334 MS/s writes the rate and the
+  filters in the order the RFIC needs.
 - **RX gain.** The radio only applies a new RX gain while an RX channel is
   enabled. With none enabled, `set_gain()` briefly enables one so that `gain()`
   reads the new value back.

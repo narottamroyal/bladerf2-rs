@@ -64,4 +64,9 @@ pub enum Error {
     /// NIOS pipe.
     #[error("device is busy")]
     Busy,
+
+    /// The RFIC refused a command: its status word reported the last write
+    /// failed. Carries the command's name.
+    #[error("the RFIC refused the {0} command")]
+    RficCommandFailed(&'static str),
 }
