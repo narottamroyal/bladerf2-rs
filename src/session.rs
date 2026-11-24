@@ -24,6 +24,7 @@ use crate::channel::{Channel, Direction};
 use crate::drivers;
 use crate::drivers::fpga::RxSource;
 use crate::drivers::rfic::{GainMode, GainRange};
+use crate::drivers::trigger::{TriggerRole, TriggerState};
 use crate::error::Result;
 use crate::maybe_future;
 use crate::nios::{Nios8x64, NiosCore};
@@ -33,8 +34,8 @@ use crate::usb::UsbTransport;
 /// Exclusive handle for configuring the radio and creating sample streams.
 ///
 /// Provides frequency, gain, sample rate and bandwidth control, bias tee,
-/// RX source (including loopback), PLL reference selection, a few diagnostics,
-/// and RX/TX streams.
+/// RX source (including loopback), PLL reference selection, timestamps and the
+/// J51 trigger, a few diagnostics, and RX/TX streams.
 /// Obtain one from [`BladeRf2::rf_link_session`](crate::BladeRf2::rf_link_session).
 ///
 /// Methods returning a [`MaybeFuture`] can be run with `.wait()` (blocking,
@@ -237,15 +238,67 @@ impl RfLinkSession<'_> {
         maybe_future::operation(drivers::rffe::pll_lock_state(self.nios))
     }
 
-    // ==================== Diagnostics ====================
+    // ==================== Timestamps and trigger ====================
 
-    /// Current 64-bit FPGA timestamp counter.
+    /// Turn timestamps on or off. While on, the RX and TX counters advance
+    /// once per sample period (one sample per channel), and every message an
+    /// RX stream receives carries the counter at its first sample (see
+    /// [`RxStream::first_timestamp`]). While off, the counters are held at 0;
+    /// turning them on starts them from 0, so leave them on to keep one
+    /// timebase across streams.
     ///
-    /// In testing this has read 0 even while streaming, so it is not yet
-    /// known to be a usable clock with this driver.
-    pub fn timestamp(&self) -> impl MaybeFuture<Output = Result<u64>> {
-        maybe_future::operation(self.nios.read(Nios8x64::Timestamp, 0))
+    /// Change this only while no stream is active: a stream takes the format
+    /// when it is activated. TX streams cannot be activated while timestamps
+    /// are on ([`Error::TxTimestamps`](crate::Error::TxTimestamps)).
+    pub fn set_timestamps(&self, on: bool) -> impl MaybeFuture<Output = Result<()>> {
+        maybe_future::operation(drivers::fpga::set_timestamps(self.nios, on))
     }
+
+    /// Current value of a direction's timestamp counter. It reads 0 while
+    /// timestamps are off. The value is sampled at an unknown point during
+    /// the request's USB round trip, so use the timestamps an RX stream
+    /// receives for timing samples.
+    pub fn timestamp(&self, direction: Direction) -> impl MaybeFuture<Output = Result<u64>> {
+        let address = match direction {
+            Direction::Rx => 0,
+            Direction::Tx => 1,
+        };
+        maybe_future::operation(self.nios.read(Nios8x64::Timestamp, address))
+    }
+
+    /// Arm (`on`) or disarm a direction's trigger on J51-1 in `role` (see
+    /// [`TriggerRole`]). While armed, the direction's samples flow only while
+    /// the line is low, which a master drives once it fires. Arm before
+    /// activating the stream. Arming again closes the gate until the next
+    /// fire, even mid-stream.
+    ///
+    /// Only one of RX and TX may be master: arming a master fails with
+    /// [`Error::TriggerMaster`](crate::Error::TriggerMaster) if the other
+    /// direction is one.
+    pub fn trigger_arm(
+        &self,
+        direction: Direction,
+        role: TriggerRole,
+        on: bool,
+    ) -> impl MaybeFuture<Output = Result<()>> {
+        maybe_future::operation(drivers::trigger::arm(self.nios, direction, role, on))
+    }
+
+    /// Fire a direction's trigger: a master drives J51-1 low, which releases
+    /// every armed direction on the line.
+    pub fn trigger_fire(&self, direction: Direction) -> impl MaybeFuture<Output = Result<()>> {
+        maybe_future::operation(drivers::trigger::fire(self.nios, direction))
+    }
+
+    /// A direction's trigger state.
+    pub fn trigger_state(
+        &self,
+        direction: Direction,
+    ) -> impl MaybeFuture<Output = Result<TriggerState>> {
+        maybe_future::operation(drivers::trigger::trigger_state(self.nios, direction))
+    }
+
+    // ==================== Diagnostics ====================
 
     /// Disable RX IQ correction and DC tracking loops.
     pub fn disable_tracking_control(&self) -> impl MaybeFuture<Output = Result<()>> {

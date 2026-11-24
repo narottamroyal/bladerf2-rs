@@ -4,11 +4,18 @@
 //! `[-1.0, 1.0)` by dividing by 2048. Dual-channel streams interleave both
 //! channels on the wire (`I0, Q0, I1, Q1, ...`).
 //!
+//! While timestamps are on (see
+//! [`RfLinkSession::set_timestamps`](crate::RfLinkSession::set_timestamps)),
+//! RX samples arrive in messages of one FX3 DMA buffer each. Each message
+//! starts with a 16-byte header holding the timestamp of its first sample;
+//! [`RxStream`] removes the headers and reports the timestamps and any
+//! samples the FPGA dropped.
+//!
 //! Every operation returns a [`MaybeFuture`]: call `.wait()` to block, or
 //! `.await` it from async code.
 
 use crate::channel::{Channel, Direction};
-use crate::drivers::rfic;
+use crate::drivers::{fpga, rfic};
 use crate::error::{Error, Result};
 use crate::maybe_future::{self, with_timeout};
 use crate::nios::NiosCore;
@@ -59,6 +66,147 @@ fn c32_to_q11(sample: Complex32) -> [u8; 4] {
     let [i0, i1] = clamp_q11(sample.re).to_le_bytes();
     let [q0, q1] = clamp_q11(sample.im).to_le_bytes();
     [i0, i1, q0, q1]
+}
+
+// ==================== Metadata messages ====================
+
+/// Size of a metadata message header.
+const HEADER_SIZE: usize = 16;
+
+/// A metadata message header: bytes 0-3 are
+/// reserved, 4-11 hold the timestamp of the message's first sample and 12-15
+/// the flags, all little-endian.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Header {
+    timestamp: u64,
+    /// Bit 16 is the J51-1 level at the first sample and bit 0 the TX
+    /// underrun latch. The FPGA sets no flag for an RX overrun; it shows only
+    /// as a timestamp jump.
+    #[cfg_attr(not(test), allow(dead_code))]
+    flags: u32,
+}
+
+impl Header {
+    fn parse(message: &[u8]) -> Self {
+        Self {
+            timestamp: u64::from_le_bytes(*message[4..].first_chunk().expect("whole header")),
+            flags: u32::from_le_bytes(*message[12..].first_chunk().expect("whole header")),
+        }
+    }
+}
+
+/// How samples sit in received RX transfers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Format {
+    /// Samples only.
+    Raw,
+    /// Messages of `message` bytes, each a header followed by samples. A
+    /// transfer holds whole messages.
+    Metadata { message: usize },
+}
+
+impl Format {
+    /// Sample bytes in a transfer of `len` bytes, counting whole samples only.
+    fn payload_len(self, len: usize) -> usize {
+        match self {
+            Self::Raw => len / 4 * 4,
+            Self::Metadata { message } => len / message * (message - HEADER_SIZE),
+        }
+    }
+
+    /// The contiguous bytes of `transfer` holding sample bytes from `offset`
+    /// (counted in sample bytes) up to the end of their message.
+    fn segment(self, transfer: &[u8], offset: usize) -> &[u8] {
+        match self {
+            Self::Raw => &transfer[offset..self.payload_len(transfer.len())],
+            Self::Metadata { message } => {
+                let payload = message - HEADER_SIZE;
+                let base = offset / payload * message;
+                &transfer[base + HEADER_SIZE + offset % payload..base + message]
+            }
+        }
+    }
+
+    /// The headers of a transfer's messages.
+    fn headers(self, transfer: &[u8]) -> impl Iterator<Item = Header> + '_ {
+        let message = match self {
+            Self::Raw => None,
+            Self::Metadata { message } => Some(message),
+        };
+        message
+            .into_iter()
+            .flat_map(|message| transfer.chunks_exact(message))
+            .map(Header::parse)
+    }
+
+    /// Timestamp of the sample at `offset` (in sample bytes) in `transfer`,
+    /// for a stream of `channels` channels, or `None` for raw samples.
+    fn timestamp_at(self, transfer: &[u8], offset: usize, channels: usize) -> Option<u64> {
+        let Self::Metadata { message } = self else {
+            return None;
+        };
+        let payload = message - HEADER_SIZE;
+        let header = Header::parse(&transfer[offset / payload * message..]);
+        Some(header.timestamp + (offset % payload / 4 / channels) as u64)
+    }
+}
+
+/// Counts samples the FPGA dropped, from the jumps between consecutive
+/// message timestamps.
+#[derive(Debug, Clone, Copy)]
+struct LossCounter {
+    /// Timestamp advance per message: its samples per channel.
+    advance: u64,
+    /// Timestamp the next message should carry.
+    next: Option<u64>,
+    /// Samples per channel lost so far.
+    lost: u64,
+}
+
+impl LossCounter {
+    fn new(format: Format, channels: usize) -> Self {
+        let advance = match format {
+            Format::Raw => 0,
+            Format::Metadata { message } => ((message - HEADER_SIZE) / 4 / channels) as u64,
+        };
+        Self {
+            advance,
+            next: None,
+            lost: 0,
+        }
+    }
+
+    fn message(&mut self, header: Header) {
+        if let Some(next) = self.next {
+            self.lost += header.timestamp.saturating_sub(next);
+        }
+        self.next = Some(header.timestamp + self.advance);
+    }
+}
+
+/// Converts samples from the sample bytes of `transfer`, starting at `offset`
+/// (in sample bytes), passing each to `put`, until `count` samples have been
+/// converted or the transfer is used up. Returns the number converted and
+/// advances `offset` past them.
+fn take_samples(
+    format: Format,
+    transfer: &[u8],
+    offset: &mut usize,
+    count: usize,
+    mut put: impl FnMut(usize, Complex32),
+) -> usize {
+    let end = format.payload_len(transfer.len());
+    let mut taken = 0;
+    while taken < count && *offset < end {
+        let samples = format.segment(transfer, *offset).as_chunks::<4>().0;
+        let n = samples.len().min(count - taken);
+        for (sample, k) in samples[..n].iter().zip(taken..) {
+            put(k, q11_to_c32(sample));
+        }
+        taken += n;
+        *offset += n * 4;
+    }
+    taken
 }
 
 // ==================== Radio path ====================
@@ -237,8 +385,15 @@ pub struct RxStream {
     path: Path<In>,
     /// Completed transfers that have not been read in full, oldest first.
     received: VecDeque<Buffer>,
-    /// Bytes of the oldest received transfer that have already been read.
+    /// Sample bytes of the oldest received transfer that have already been
+    /// read.
     offset: usize,
+    /// Format of the received transfers, set on activation.
+    format: Format,
+    /// Samples lost since activation.
+    losses: LossCounter,
+    /// Timestamp of the first sample of the last read.
+    first_timestamp: Option<u64>,
 }
 
 impl std::fmt::Debug for RxStream {
@@ -261,6 +416,9 @@ impl RxStream {
             path: Path::new(transport, nios, channels)?,
             received: VecDeque::new(),
             offset: 0,
+            format: Format::Raw,
+            losses: LossCounter::new(Format::Raw, channels.len()),
+            first_timestamp: None,
         })
     }
 
@@ -274,9 +432,33 @@ impl RxStream {
         TRANSFER_SIZE / 4 / self.path.channels.len()
     }
 
-    /// Activate the stream (enables the RFIC modules and USB RX path).
+    /// Activate the stream (enables the RFIC modules and USB RX path). The
+    /// stream receives timestamps if they are on now.
     pub fn activate(&mut self) -> impl MaybeFuture<Output = Result<()>> + '_ {
-        maybe_future::operation(self.path.start())
+        maybe_future::operation(async move {
+            self.format = match fpga::metadata_message_size(&self.path.nios).await? {
+                Some(message) => Format::Metadata { message },
+                None => Format::Raw,
+            };
+            self.losses = LossCounter::new(self.format, self.num_channels());
+            self.first_timestamp = None;
+            self.path.start().await
+        })
+    }
+
+    /// Timestamp of the first sample of the last [`read`](Self::read), in
+    /// sample periods (one sample per channel), or `None` if the stream was
+    /// activated with timestamps off or nothing has been read.
+    pub fn first_timestamp(&self) -> Option<u64> {
+        self.first_timestamp
+    }
+
+    /// Samples per channel the FPGA dropped since activation, because they
+    /// were not read fast enough. Always 0 with timestamps off, where drops
+    /// cannot be seen. Counted as messages are received, so it covers samples
+    /// received but not yet read.
+    pub fn lost(&self) -> u64 {
+        self.losses.lost
     }
 
     /// Deactivate the stream and discard samples that were received but not
@@ -308,9 +490,14 @@ impl RxStream {
         })
     }
 
-    /// Unread bytes in the received transfers, counting whole samples only.
+    /// Unread sample bytes in the received transfers, counting whole samples
+    /// only.
     fn buffered(&self) -> usize {
-        let received: usize = self.received.iter().map(|t| t.len() / 4 * 4).sum();
+        let received: usize = self
+            .received
+            .iter()
+            .map(|t| self.format.payload_len(t.len()))
+            .sum();
         received - self.offset
     }
 
@@ -324,30 +511,38 @@ impl RxStream {
             }
             let transfer = usb::next_complete(&mut self.path.endpoint).await;
             transfer.status?;
+            for header in self.format.headers(&transfer.buffer) {
+                self.losses.message(header);
+            }
             self.received.push_back(transfer.buffer);
         }
         Ok(())
     }
 
     /// Converts samples from the received transfers into `buffers`, which
-    /// [`receive`](Self::receive) has made sure are available. Sample `k` on the
-    /// wire belongs to channel `k % channels` (see the module docs). Transfers
-    /// are submitted again once they have been read in full.
+    /// [`receive`](Self::receive) has made sure are available, and records the
+    /// first one's timestamp. Sample `k` on the wire belongs to channel
+    /// `k % channels` (see the module docs). Transfers are submitted again
+    /// once they have been read in full.
     fn copy_out(&mut self, buffers: &mut [&mut [Complex32]]) {
         let channels = buffers.len();
         let total = buffers[0].len() * channels;
         let mut k = 0;
         while k < total {
             let transfer = self.received.front().expect("receive buffered enough");
-            let samples = transfer[self.offset..].as_chunks::<4>().0;
-            let count = samples.len().min(total - k);
-            for (sample, k) in samples[..count].iter().zip(k..) {
-                buffers[k % channels][k / channels] = q11_to_c32(sample);
+            if k == 0 && self.offset < self.format.payload_len(transfer.len()) {
+                self.first_timestamp = self.format.timestamp_at(transfer, self.offset, channels);
             }
-            k += count;
-            self.offset += count * 4;
+            let start = k;
+            k += take_samples(
+                self.format,
+                transfer,
+                &mut self.offset,
+                total - k,
+                |i, sample| buffers[(start + i) % channels][(start + i) / channels] = sample,
+            );
 
-            if self.offset + 4 > transfer.len() {
+            if self.offset == self.format.payload_len(transfer.len()) {
                 let transfer = self.received.pop_front().expect("front exists");
                 self.offset = 0;
                 if self.path.endpoint.pending() < MAX_PENDING {
@@ -399,9 +594,18 @@ impl TxStream {
         TRANSFER_SIZE / 4 / self.path.channels.len()
     }
 
-    /// Activate the stream (enables the RFIC modules and USB TX path).
+    /// Activate the stream (enables the RFIC modules and USB TX path). Fails
+    /// with [`Error::TxTimestamps`] while timestamps are on.
     pub fn activate(&mut self) -> impl MaybeFuture<Output = Result<()>> + '_ {
-        maybe_future::operation(self.path.start())
+        maybe_future::operation(async move {
+            if fpga::metadata_message_size(&self.path.nios)
+                .await?
+                .is_some()
+            {
+                return Err(Error::TxTimestamps);
+            }
+            self.path.start().await
+        })
     }
 
     /// Deactivate the stream. On native targets, samples that were written but
@@ -489,6 +693,108 @@ mod tests {
             c32_to_q11(Complex32::new(2.0, -2.0)),
             [0xFF, 0x07, 0x00, 0xF8]
         );
+    }
+
+    /// A metadata message of `message` bytes: a header with `timestamp` and
+    /// `flags`, then samples whose I values count up from `first`.
+    fn message(message: usize, timestamp: u64, flags: u32, first: i16) -> Vec<u8> {
+        let mut bytes = 0x1234_4321_u32.to_le_bytes().to_vec();
+        bytes.extend(timestamp.to_le_bytes());
+        bytes.extend(flags.to_le_bytes());
+        for i in 0..(message - HEADER_SIZE) / 4 {
+            bytes.extend((first + i as i16).to_le_bytes());
+            bytes.extend(0_i16.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn header_holds_timestamp_and_flags() {
+        let bytes = message(8192, 0x0102_0304_0506_0708, 0x0001_0001, 0);
+        assert_eq!(&bytes[4..12], &[8, 7, 6, 5, 4, 3, 2, 1]);
+        assert_eq!(
+            Header::parse(&bytes),
+            Header {
+                timestamp: 0x0102_0304_0506_0708,
+                flags: 0x0001_0001,
+            }
+        );
+    }
+
+    #[test]
+    fn metadata_payload_excludes_headers() {
+        let format = Format::Metadata { message: 8192 };
+        assert_eq!(format.payload_len(16384), 2 * 8176);
+        assert_eq!(Format::Raw.payload_len(16386), 16384);
+    }
+
+    /// Samples are taken across message and transfer boundaries with every
+    /// header removed, and each read's first timestamp is that of its first
+    /// sample, per channel.
+    #[test]
+    fn headers_are_stripped_across_messages() {
+        const MESSAGE: usize = 64; // 12 samples after the header
+        let format = Format::Metadata { message: MESSAGE };
+        let mut transfer = message(MESSAGE, 100, 0, 0);
+        transfer.extend(message(MESSAGE, 106, 0, 12));
+        let next = message(MESSAGE, 112, 0, 24);
+        let transfers = [transfer, next];
+
+        let mut out = Vec::new();
+        let mut offset = 4 * 10; // part-way into the first message
+        assert_eq!(format.timestamp_at(&transfers[0], offset, 2), Some(105));
+        let taken = take_samples(format, &transfers[0], &mut offset, 100, |k, sample| {
+            assert_eq!(k, out.len());
+            out.push(sample.re);
+        });
+        assert_eq!(taken, 14);
+        assert_eq!(offset, format.payload_len(transfers[0].len()));
+
+        let mut offset = 0;
+        assert_eq!(format.timestamp_at(&transfers[1], offset, 2), Some(112));
+        take_samples(format, &transfers[1], &mut offset, 4, |_, sample| {
+            out.push(sample.re)
+        });
+        assert_eq!(offset, 16);
+        assert_eq!(format.timestamp_at(&transfers[1], offset, 2), Some(114));
+
+        let expected: Vec<f32> = (10..28).map(|i| i as f32 / Q11_SCALE).collect();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn raw_samples_are_taken_whole() {
+        let transfer: Vec<u8> = (0..6_i16)
+            .flat_map(|i| [i.to_le_bytes(), [0, 0]].concat())
+            .collect();
+        let mut offset = 4;
+        let mut out = Vec::new();
+        let taken = take_samples(Format::Raw, &transfer[..23], &mut offset, 10, |_, s| {
+            out.push(s.re)
+        });
+        assert_eq!(taken, 4);
+        assert_eq!(out, [1.0, 2.0, 3.0, 4.0].map(|i: f32| i / Q11_SCALE));
+        assert_eq!(Format::Raw.timestamp_at(&transfer, 0, 1), None);
+    }
+
+    /// Two channels advance the timestamp by 1022 per 8 KiB message; a later
+    /// header counts the jump beyond that as lost samples.
+    #[test]
+    fn jumps_count_as_lost_samples() {
+        let format = Format::Metadata { message: 8192 };
+        let mut losses = LossCounter::new(format, 2);
+        assert_eq!(losses.advance, 1022);
+        assert_eq!(LossCounter::new(format, 1).advance, 2044);
+
+        let mut transfer = message(8192, 5000, 0, 0);
+        transfer.extend(message(8192, 6022, 0, 0));
+        transfer.extend(message(8192, 7144, 0, 0));
+        for header in format.headers(&transfer) {
+            losses.message(header);
+        }
+        assert_eq!(losses.lost, 100);
+        assert_eq!(losses.next, Some(8166));
+        assert_eq!(Format::Raw.headers(&transfer).count(), 0);
     }
 
     #[test]

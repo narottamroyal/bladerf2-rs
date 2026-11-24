@@ -92,6 +92,11 @@ each setting and reads it back, and receives a few buffers of samples.
 - **Deactivate streams.** On native targets, dropping an active stream stops it.
   In the browser it keeps running until the next stream in that direction is
   activated, or the device is opened again.
+- **Timestamps.** `set_timestamps(true)` starts the FPGA's sample counters from
+  0. An RX stream activated while they are on reports the counter at the first
+  sample of each read (`first_timestamp()`) and the samples the FPGA dropped
+  (`lost()`). TX streams need timestamps off. Arm the J51 trigger
+  (`trigger_arm`) before activating the stream it gates.
 - **MIMO loopback.** FPGA 0.16.0 loses samples in MIMO digital loopback. SISO
   loopback is unaffected.
 

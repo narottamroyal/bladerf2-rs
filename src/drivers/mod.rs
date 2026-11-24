@@ -9,6 +9,7 @@ pub(crate) mod fpga;
 pub(crate) mod ina219;
 pub(crate) mod rffe;
 pub(crate) mod rfic;
+pub(crate) mod trigger;
 
 use crate::error::{Error, Result};
 use crate::maybe_future;

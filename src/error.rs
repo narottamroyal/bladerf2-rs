@@ -69,4 +69,14 @@ pub enum Error {
     /// failed. Carries the command's name.
     #[error("the RFIC refused the {0} command")]
     RficCommandFailed(&'static str),
+
+    /// A TX stream was activated while timestamps are on. TX then expects
+    /// timestamped messages, which this driver does not send.
+    #[error("TX streaming needs timestamps off")]
+    TxTimestamps,
+
+    /// Only one of RX and TX may be the trigger master: both drive the same
+    /// J51 pin.
+    #[error("the other direction is already the trigger master")]
+    TriggerMaster,
 }

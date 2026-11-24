@@ -117,6 +117,15 @@ macro_rules! impl_nios_packet {
     };
 }
 
+/// 8-bit address, 8-bit data packets.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Nios8x8 {
+    /// TX trigger control register.
+    TxTriggerCtl = 3,
+    /// RX trigger control register.
+    RxTriggerCtl = 4,
+}
+
 /// 8-bit address, 16-bit data packets.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
@@ -159,6 +168,7 @@ pub(crate) enum Nios16x64 {
     RfIc = 1,
 }
 
+impl_nios_packet!(Nios8x8, b'A', u8, u8);
 impl_nios_packet!(Nios8x16, b'B', u8, u16);
 impl_nios_packet!(Nios8x32, b'C', u8, u32);
 impl_nios_packet!(Nios8x64, b'D', u8, u64);
@@ -304,5 +314,47 @@ impl NiosCore {
         let mut lease = IoLease::new(&self.io)?;
         lease.io_mut().transfer(target, address, data, true).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The NIOS 8x8 packet: magic, target, flags,
+    /// reserved, address, data, then zeros.
+    #[test]
+    fn trigger_packet_layout() {
+        let packet = Nios8x8::RxTriggerCtl.encode(0, 0x05, true);
+        assert_eq!(
+            packet,
+            [b'A', 4, 1, 0, 0, 0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        let packet = Nios8x8::TxTriggerCtl.encode(0, 0, false);
+        assert_eq!(packet, [b'A', 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn trigger_response_decodes_data_byte() {
+        let response = [b'A', 4, 0x02, 0, 0, 0x0D, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(Nios8x8::RxTriggerCtl.decode(&response).unwrap(), 0x0D);
+        let failed = [b'A', 4, 0x00, 0, 0, 0x0D, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(Nios8x8::RxTriggerCtl.decode(&failed).is_err());
+    }
+
+    /// The NIOS 8x64 packet: address at byte 4 (0 = RX,
+    /// 1 = TX), little-endian data at bytes 5..13.
+    #[test]
+    fn timestamp_packet_layout() {
+        let packet = Nios8x64::Timestamp.encode(1, 0, false);
+        assert_eq!(packet, [b'D', 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+        let mut response = [0u8; PACKET_SIZE];
+        response[..5].copy_from_slice(&[b'D', 0, 0x02, 0, 0]);
+        response[5..13].copy_from_slice(&0x0123_4567_89AB_CDEF_u64.to_le_bytes());
+        assert_eq!(
+            Nios8x64::Timestamp.decode(&response).unwrap(),
+            0x0123_4567_89AB_CDEF
+        );
     }
 }

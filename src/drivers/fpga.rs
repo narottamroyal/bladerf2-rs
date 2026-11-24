@@ -1,4 +1,4 @@
-//! FPGA control register: RX sample source.
+//! FPGA control register: RX sample source and stream timestamps.
 
 use crate::error::{Error, Result};
 use crate::nios::{Nios8x32, NiosCore};
@@ -45,4 +45,57 @@ pub(crate) async fn set_rx_source(nios: &NiosCore, source: RxSource) -> Result<(
     let control = nios.read(Nios8x32::Control, 0).await?;
     let control = (control & !RX_SOURCE_MASK) | (value << RX_SOURCE_SHIFT);
     nios.write(Nios8x32::Control, 0, control).await
+}
+
+/// Control register bit that turns on stream metadata and runs the timestamp
+/// counters (the FPGA's `meta_sync`).
+const TIMESTAMPS: u32 = 1 << 16;
+/// Control register bit for USB 2 DMA buffers (the FPGA's `usb_speed`).
+const SMALL_DMA: u32 = 1 << 7;
+
+/// Size of one metadata message (one FX3 DMA buffer): 8 KiB, or 2 KiB with
+/// USB 2 DMA buffers.
+const MESSAGE_SIZE: usize = 8192;
+const SMALL_MESSAGE_SIZE: usize = 2048;
+
+/// Turn stream metadata and the RX and TX timestamp counters on or off. The
+/// counters are held at 0 while off, and count from 0 once turned on.
+pub(crate) async fn set_timestamps(nios: &NiosCore, on: bool) -> Result<()> {
+    let control = nios.read(Nios8x32::Control, 0).await?;
+    let control = if on {
+        control | TIMESTAMPS
+    } else {
+        control & !TIMESTAMPS
+    };
+    nios.write(Nios8x32::Control, 0, control).await
+}
+
+/// Size of each stream message while timestamps are on, or `None` while they
+/// are off.
+pub(crate) async fn metadata_message_size(nios: &NiosCore) -> Result<Option<usize>> {
+    let control = nios.read(Nios8x32::Control, 0).await?;
+    Ok(message_size(control))
+}
+
+fn message_size(control: u32) -> Option<usize> {
+    if control & TIMESTAMPS == 0 {
+        None
+    } else if control & SMALL_DMA == 0 {
+        Some(MESSAGE_SIZE)
+    } else {
+        Some(SMALL_MESSAGE_SIZE)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_size_follows_control_bits() {
+        assert_eq!(message_size(0), None);
+        assert_eq!(message_size(SMALL_DMA), None);
+        assert_eq!(message_size(1 << 16), Some(8192));
+        assert_eq!(message_size((1 << 16) | (1 << 7)), Some(2048));
+    }
 }

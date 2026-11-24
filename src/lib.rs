@@ -98,6 +98,7 @@ mod usb;
 pub use channel::{Channel, Direction};
 pub use drivers::fpga::RxSource;
 pub use drivers::rfic::{GainMode, GainRange};
+pub use drivers::trigger::{TriggerRole, TriggerState};
 pub use error::{Error, Result};
 #[cfg(all(feature = "hardware-tests", not(target_arch = "wasm32")))]
 #[doc(hidden)]
