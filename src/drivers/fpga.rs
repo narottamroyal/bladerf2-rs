@@ -53,10 +53,10 @@ const TIMESTAMPS: u32 = 1 << 16;
 /// Control register bit for USB 2 DMA buffers (the FPGA's `usb_speed`).
 const SMALL_DMA: u32 = 1 << 7;
 
-/// Size of one metadata message (one FX3 DMA buffer): 8 KiB, or 2 KiB with
-/// USB 2 DMA buffers.
+/// Size of one metadata message (one FX3 DMA buffer): 2048 32-bit words, or
+/// 1024 with USB 2 DMA buffers.
 const MESSAGE_SIZE: usize = 8192;
-const SMALL_MESSAGE_SIZE: usize = 2048;
+const SMALL_MESSAGE_SIZE: usize = 4096;
 
 /// Turn stream metadata and the RX and TX timestamp counters on or off. The
 /// counters are held at 0 while off, and count from 0 once turned on.
@@ -96,6 +96,6 @@ mod tests {
         assert_eq!(message_size(0), None);
         assert_eq!(message_size(SMALL_DMA), None);
         assert_eq!(message_size(1 << 16), Some(8192));
-        assert_eq!(message_size((1 << 16) | (1 << 7)), Some(2048));
+        assert_eq!(message_size((1 << 16) | (1 << 7)), Some(4096));
     }
 }

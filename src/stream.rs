@@ -101,7 +101,8 @@ enum Format {
     /// Samples only.
     Raw,
     /// Messages of `message` bytes, each a header followed by samples. A
-    /// transfer holds whole messages.
+    /// transfer holds whole messages, so a partial
+    /// message at the end of a short transfer is ignored.
     Metadata { message: usize },
 }
 
@@ -427,9 +428,11 @@ impl RxStream {
         self.path.channels.len()
     }
 
-    /// Recommended maximum samples per channel per `read` call.
+    /// Recommended maximum samples per channel per `read` call: the samples
+    /// per channel in one USB transfer. Once the stream is activated with
+    /// timestamps on, this leaves out the message headers.
     pub fn mtu(&self) -> usize {
-        TRANSFER_SIZE / 4 / self.path.channels.len()
+        self.format.payload_len(TRANSFER_SIZE) / 4 / self.path.channels.len()
     }
 
     /// Activate the stream (enables the RFIC modules and USB RX path). The
@@ -521,36 +524,57 @@ impl RxStream {
 
     /// Converts samples from the received transfers into `buffers`, which
     /// [`receive`](Self::receive) has made sure are available, and records the
-    /// first one's timestamp. Sample `k` on the wire belongs to channel
-    /// `k % channels` (see the module docs). Transfers are submitted again
-    /// once they have been read in full.
+    /// first one's timestamp. Transfers are submitted again once they have
+    /// been read in full.
     fn copy_out(&mut self, buffers: &mut [&mut [Complex32]]) {
-        let channels = buffers.len();
-        let total = buffers[0].len() * channels;
-        let mut k = 0;
-        while k < total {
-            let transfer = self.received.front().expect("receive buffered enough");
-            if k == 0 && self.offset < self.format.payload_len(transfer.len()) {
-                self.first_timestamp = self.format.timestamp_at(transfer, self.offset, channels);
-            }
-            let start = k;
-            k += take_samples(
-                self.format,
-                transfer,
-                &mut self.offset,
-                total - k,
-                |i, sample| buffers[(start + i) % channels][(start + i) / channels] = sample,
-            );
-
-            if self.offset == self.format.payload_len(transfer.len()) {
-                let transfer = self.received.pop_front().expect("front exists");
-                self.offset = 0;
-                if self.path.endpoint.pending() < MAX_PENDING {
-                    self.path.endpoint.submit(transfer);
+        let endpoint = &mut self.path.endpoint;
+        self.first_timestamp = copy_samples(
+            self.format,
+            &mut self.received,
+            &mut self.offset,
+            buffers,
+            |transfer| {
+                if endpoint.pending() < MAX_PENDING {
+                    endpoint.submit(transfer);
                 }
-            }
+            },
+        );
+    }
+}
+
+/// Fills `buffers` from the `received` transfers, which must hold enough
+/// samples, starting at sample byte `offset` of the oldest. Sample `k` on the
+/// wire belongs to channel `k % channels` (see the module docs). Transfers read
+/// in full are removed and passed to `done`. Returns the first sample's
+/// timestamp, if the format has timestamps.
+fn copy_samples<B: std::ops::Deref<Target = [u8]>>(
+    format: Format,
+    received: &mut VecDeque<B>,
+    offset: &mut usize,
+    buffers: &mut [&mut [Complex32]],
+    mut done: impl FnMut(B),
+) -> Option<u64> {
+    let channels = buffers.len();
+    let total = buffers[0].len() * channels;
+    let mut first_timestamp = None;
+    let mut k = 0;
+    while k < total {
+        let transfer = &**received.front().expect("enough samples received");
+        let end = format.payload_len(transfer.len());
+        if k == 0 && *offset < end {
+            first_timestamp = format.timestamp_at(transfer, *offset, channels);
+        }
+        let start = k;
+        k += take_samples(format, transfer, offset, total - k, |i, sample| {
+            buffers[(start + i) % channels][(start + i) / channels] = sample;
+        });
+
+        if *offset == end {
+            done(received.pop_front().expect("front exists"));
+            *offset = 0;
         }
     }
+    first_timestamp
 }
 
 // ==================== TxStream ====================
@@ -760,6 +784,55 @@ mod tests {
 
         let expected: Vec<f32> = (10..28).map(|i| i as f32 / Q11_SCALE).collect();
         assert_eq!(out, expected);
+    }
+
+    /// One read spanning two queued transfers takes its first timestamp from
+    /// the read's first sample, hands back each transfer read in full, and
+    /// leaves the rest for the next read. Losses count across transfers.
+    #[test]
+    fn reads_span_transfers() {
+        const MESSAGE: usize = 64; // 6 samples per channel per message
+        let format = Format::Metadata { message: MESSAGE };
+        let first = [message(MESSAGE, 0, 0, 0), message(MESSAGE, 6, 0, 12)].concat();
+        let second = [message(MESSAGE, 20, 0, 24), message(MESSAGE, 26, 0, 36)].concat();
+        let mut losses = LossCounter::new(format, 2);
+        for header in format.headers(&first).chain(format.headers(&second)) {
+            losses.message(header);
+        }
+        assert_eq!(losses.lost, 8);
+
+        let mut received = VecDeque::from([first, second]);
+        let mut offset = 0;
+        let mut done = 0;
+        let (mut rx0, mut rx1) = ([Complex32::ZERO; 4], [Complex32::ZERO; 4]);
+        let first_ts = copy_samples(
+            format,
+            &mut received,
+            &mut offset,
+            &mut [&mut rx0, &mut rx1],
+            |_| done += 1,
+        );
+        assert_eq!(first_ts, Some(0));
+
+        let (mut rx0, mut rx1) = ([Complex32::ZERO; 10], [Complex32::ZERO; 10]);
+        let next_ts = copy_samples(
+            format,
+            &mut received,
+            &mut offset,
+            &mut [&mut rx0, &mut rx1],
+            |_| done += 1,
+        );
+        assert_eq!(next_ts, Some(4));
+        assert_eq!(done, 1);
+        assert_eq!(received.len(), 1);
+        assert_eq!(offset, 4 * 4);
+        // Channel 0 takes the even samples: 8, 10, then 12.. from message 2.
+        let i: Vec<f32> = rx0.iter().map(|s| s.re * Q11_SCALE).collect();
+        assert_eq!(
+            i,
+            [8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0]
+        );
+        assert_eq!(format.timestamp_at(&received[0], offset, 2), Some(22));
     }
 
     #[test]

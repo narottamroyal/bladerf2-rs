@@ -77,6 +77,7 @@ pub(crate) async fn arm(
     role: TriggerRole,
     on: bool,
 ) -> Result<()> {
+    // Disarming as master also sets the master bit, so check that too.
     if role == TriggerRole::Master {
         let other = match direction {
             Direction::Rx => Direction::Tx,
